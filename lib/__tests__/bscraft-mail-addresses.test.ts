@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { JMAPClient } from '../jmap/client';
-import { canonicalEmail, canonicalMailCalls, canonicalMailResponse, canonicalMailText, withLegacyMailSearch } from '../bscraft-mail-addresses';
+import { canonicalEmail, canonicalIdentities, canonicalMailCalls, canonicalMailResponse, canonicalMailText, withLegacyMailSearch } from '../bscraft-mail-addresses';
 
 describe('corporate mail address presentation', () => {
   afterEach(() => vi.restoreAllMocks());
@@ -24,6 +24,24 @@ describe('corporate mail address presentation', () => {
     for (const value of ['x@bslabs.tech.evil', 'x@bslabs.tech-extra', 'x@other.tech', 'https://bslabs.tech']) {
       expect(canonicalMailText(value)).toBe(value);
     }
+  });
+
+  it('uses existing canonical sender IDs and preserves identities without a replacement', async () => {
+    const old = { id: 'old', email: 'i.bezgin@bslabs.tech', name: 'Ivan' };
+    const current = { id: 'current', email: 'i.bezgin@bscraft.ru', name: 'Ivan', textSignature: 'i.bezgin@bslabs.tech' };
+    const other = { id: 'other', email: 'outside@example.net', name: 'External' };
+    expect(canonicalIdentities([old, current, other])).toEqual([
+      { ...current, textSignature: 'i.bezgin@bscraft.ru' }, other,
+    ]);
+    expect(canonicalIdentities([old])).toEqual([old]);
+    const client = new JMAPClient('https://mail.example.com', 'test', 'test');
+    Object.assign(client, { apiUrl: 'https://mail.example.com/jmap', accountId: 'account-1' });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      methodResponses: [['Identity/get', { list: [old, current] }, '0']],
+    }), { status: 200 }));
+    expect((await client.getIdentities()).map(identity => [identity.id, identity.email]))
+      .toEqual([['current', 'i.bezgin@bscraft.ru']]);
+    expect(current.textSignature).toBe('i.bezgin@bslabs.tech');
   });
 
   it('projects all displayed headers and bodies while preserving original source identity', () => {

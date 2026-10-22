@@ -16,6 +16,23 @@ export function canonicalMailText(value: string): string {
   return value.replace(LEGACY_EMAIL_DOMAIN, '@bscraft.ru');
 }
 
+/** Prefer the server's existing canonical identities, keeping their real IDs. */
+export function canonicalIdentities(values: unknown[]): unknown[] {
+  const emails = new Set(values.flatMap(value => isRecord(value) && typeof value.email === 'string'
+    ? [value.email.toLowerCase()] : []));
+  return values.filter(value => {
+    if (!isRecord(value) || typeof value.email !== 'string') return true;
+    const canonical = canonicalMailText(value.email);
+    return canonical === value.email || !emails.has(canonical.toLowerCase());
+  }).map(value => {
+    if (!isRecord(value)) return value;
+    return Object.fromEntries(Object.entries(value).map(([key, text]) => [key,
+      ['name', 'textSignature', 'htmlSignature'].includes(key) && typeof text === 'string'
+        ? canonicalMailText(text) : text,
+    ]));
+  });
+}
+
 export function canonicalEmail<T>(value: T): T {
   if (!isRecord(value)) return value;
   const email: RecordValue = { ...value };
@@ -81,6 +98,7 @@ export function canonicalMailResponse<T extends Response>(response: T): T {
   if (!Array.isArray(response.methodResponses)) return response;
   return { ...response, methodResponses: response.methodResponses.map(([name, result, id]) => {
     if (!Array.isArray(result.list)) return [name, result, id];
+    if (name === 'Identity/get') return [name, { ...result, list: canonicalIdentities(result.list) }, id];
     if (name === 'Email/get') return [name, { ...result, list: result.list.map(canonicalEmail) }, id];
     if (name === 'SearchSnippet/get') return [name, { ...result, list: result.list.map(snippet => {
       if (!isRecord(snippet)) return snippet;
