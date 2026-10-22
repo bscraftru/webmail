@@ -1,4 +1,5 @@
 import { generateUUID } from '@/lib/utils';
+import { canonicalMailCalls, canonicalMailResponse } from '@/lib/bscraft-mail-addresses';
 import type { Attachment, Email, Mailbox, MailboxRights, StateChange, AccountStates, CollectionChanges, ShareNotification, BusyPeriod, CalendarParticipantIdentity, CalendarEventNotification, Thread, Identity, EmailAddress, ContactCard, AddressBook, AddressBookRights, VacationResponse, Calendar, CalendarComponentType, CalendarRights, CalendarEvent, CalendarEventFilter, CalendarTask, CreateCalendarOptions, FileNode, FileNodeFilter, FileNodeRights, Principal, PushSubscription, EmailPushConfig, DeliveryStatus, EmailSubmission, RejectedRecipient, ScheduledEmail, SendEmailResult, SharedAccount } from "./types";
 import type { SieveScript, SieveCapabilities } from "./sieve-types";
 import type { CalendarEventUpdateOptions, IJMAPClient, KeywordDiscoveryResult, KeywordInfo, KeywordMigration, SearchEmailsResult, SearchRequestOptions } from "./client-interface";
@@ -1556,7 +1557,7 @@ export class JMAPClient implements IJMAPClient {
 
     const requestBody = {
       using: using || (hasSubmissionMethod(methodCalls) ? [...SUBMISSION_USING] : ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"]),
-      methodCalls,
+      methodCalls: canonicalMailCalls(methodCalls),
     };
     const body = JSON.stringify(requestBody);
 
@@ -1591,7 +1592,7 @@ export class JMAPClient implements IJMAPClient {
       }
 
       try {
-        return JSON.parse(responseText);
+        return canonicalMailResponse(JSON.parse(responseText) as JMAPResponse);
       } catch {
         console.error('Failed to parse response:', responseText);
         throw new Error('Invalid JSON response from server');

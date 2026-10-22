@@ -1,0 +1,104 @@
+name: bscraft mail verification and image
+on:
+  pull_request:
+    branches: [bscraft-1.15]
+  push:
+    branches: [bscraft-1.15]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: bscraft-mail-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx vitest run lib/__tests__/bscraft-mail-addresses.test.ts lib/__tests__/jmap-*.test.ts --pool=forks --maxWorkers=2 --testTimeout=15000
+      - run: npm run typecheck
+      - run: npx eslint lib/bscraft-mail-addresses.ts lib/jmap/client.ts stores/email-store.ts lib/__tests__/bscraft-mail-addresses.test.ts
+  publish:
+    needs: verify
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/bscraft-1.15'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: write
+      packages: write
+    env:
+      IMAGE: ghcr.io/bscraftru/webmail:sha-${{ github.sha }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Existing immutable release
+        id: release
+        run: |
+          if gh release view "bscraft-$GITHUB_SHA" >/dev/null 2>&1; then echo 'exists=true' >> "$GITHUB_OUTPUT"; fi
+      - uses: docker/setup-buildx-action@v3
+        if: steps.release.outputs.exists != 'true'
+      - uses: docker/login-action@v3
+        if: steps.release.outputs.exists != 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Verified OCI client and existing image
+        if: steps.release.outputs.exists != 'true'
+        id: existing
+        run: |
+          curl --fail --location --silent --show-error https://github.com/regclient/regclient/releases/download/v0.11.6/regctl-linux-amd64 -o /tmp/regctl
+          echo '8e0e62a497fcdb8048d18aa927a139613176ba0531f412bc541044e28f9856bd  /tmp/regctl' | sha256sum --check
+          chmod 755 /tmp/regctl
+          if /tmp/regctl image digest "$IMAGE" >/tmp/existing-digest 2>/dev/null; then echo 'exists=true' >> "$GITHUB_OUTPUT"; fi
+      - uses: docker/build-push-action@v6
+        if: steps.release.outputs.exists != 'true' && steps.existing.outputs.exists != 'true'
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ env.IMAGE }}
+          build-args: GIT_COMMIT=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/bscraftru/webmail
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=bscraft-mail
+          cache-to: type=gha,mode=max,scope=bscraft-mail
+      - name: Verify image and export recovery capsule
+        if: steps.release.outputs.exists != 'true'
+        run: |
+          mkdir recovery
+          digest=$(/tmp/regctl image digest "$IMAGE")
+          export IMMUTABLE_IMAGE="ghcr.io/bscraftru/webmail@$digest"
+          docker pull --platform linux/amd64 "$IMMUTABLE_IMAGE" >/dev/null
+          docker image inspect "$IMMUTABLE_IMAGE" > /tmp/image-info.json
+          /tmp/regctl image export "$IMMUTABLE_IMAGE" recovery/webmail.oci.tar --name "$IMAGE"
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,re,tarfile
+          image=json.loads(pathlib.Path('/tmp/image-info.json').read_text())[0]
+          assert image['Config']['Labels']['org.opencontainers.image.revision']==os.environ['GITHUB_SHA']
+          assert image['Os']=='linux' and image['Architecture']=='amd64'
+          archive=pathlib.Path('recovery/webmail.oci.tar')
+          primary=os.environ['IMMUTABLE_IMAGE'].split('@sha256:')[1]
+          found=set()
+          with tarfile.open(archive) as stream:
+            for member in stream:
+              if member.isfile() and re.fullmatch('blobs/sha256/[0-9a-f]{64}',member.name):
+                digest=hashlib.file_digest(stream.extractfile(member),'sha256').hexdigest()
+                assert digest==member.name.rsplit('/',1)[1]
+                found.add(digest)
+          assert primary in found and image['Id'].removeprefix('sha256:') in found
+          receipt={'image':os.environ['IMMUTABLE_IMAGE'],'revision':os.environ['GITHUB_SHA'],
+            'image_config_digest':image['Id'],'archive_sha256':hashlib.file_digest(archive.open('rb'),'sha256').hexdigest(),
+            'upstream_revision':'fc22f111efaefa837d1796864664935c12cbc7bd','all_oci_blobs_verified':len(found)}
+          pathlib.Path('recovery/receipt.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          pathlib.Path('recovery/webmail.oci.tar.sha256').write_text(receipt['archive_sha256']+'  webmail.oci.tar\n')
+          PY
+          gh release create "bscraft-$GITHUB_SHA" --target "$GITHUB_SHA" --title "bscraft mail $GITHUB_SHA" --notes 'Based on Bulwark Webmail 1.15.0. Corporate address presentation; original MIME, IDs and attachments remain stored.' recovery/*
