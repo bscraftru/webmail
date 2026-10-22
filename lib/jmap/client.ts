@@ -1,5 +1,5 @@
 import { generateUUID } from '@/lib/utils';
-import { canonicalMailCalls, canonicalMailResponse } from '@/lib/bscraft-mail-addresses';
+import { canonicalCalendarInvitation, canonicalMailCalls, canonicalMailResponse } from '@/lib/bscraft-mail-addresses';
 import type { Attachment, Email, Mailbox, MailboxRights, StateChange, AccountStates, CollectionChanges, ShareNotification, BusyPeriod, CalendarParticipantIdentity, CalendarEventNotification, Thread, Identity, EmailAddress, ContactCard, AddressBook, AddressBookRights, VacationResponse, Calendar, CalendarComponentType, CalendarRights, CalendarEvent, CalendarEventFilter, CalendarTask, CreateCalendarOptions, FileNode, FileNodeFilter, FileNodeRights, Principal, PushSubscription, EmailPushConfig, DeliveryStatus, EmailSubmission, RejectedRecipient, ScheduledEmail, SendEmailResult, SharedAccount } from "./types";
 import type { SieveScript, SieveCapabilities } from "./sieve-types";
 import type { CalendarEventUpdateOptions, IJMAPClient, KeywordDiscoveryResult, KeywordInfo, KeywordMigration, SearchEmailsResult, SearchRequestOptions } from "./client-interface";
@@ -7514,7 +7514,7 @@ export class JMAPClient implements IJMAPClient {
       const parsed = result.parsed?.[blobId];
       if (parsed) {
         return (Array.isArray(parsed) ? parsed : [parsed])
-          .map((event) => normalizeCalendarEventLike(event as Partial<CalendarEvent>));
+          .map((event) => canonicalCalendarInvitation(normalizeCalendarEventLike(event as Partial<CalendarEvent>)));
       }
 
       return [];

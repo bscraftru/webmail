@@ -16,6 +16,37 @@ export function canonicalMailText(value: string): string {
   return value.replace(LEGACY_EMAIL_DOMAIN, '@bscraft.ru');
 }
 
+/** Server highlight markers may split an address into several text segments. */
+export function canonicalSearchSnippet(value: string): string {
+  const plain = value.replace(/<\/?mark>/g, '');
+  const canonical = canonicalMailText(plain);
+  return canonical === plain ? value : canonical;
+}
+
+/** Canonical mail invitation presentation; source ICS and participant IDs stay original. */
+export function canonicalCalendarInvitation<T>(value: T): T {
+  if (!isRecord(value)) return value;
+  const event: RecordValue = { ...value };
+  for (const field of ['title', 'description', 'organizerCalendarAddress']) {
+    if (typeof event[field] === 'string') event[field] = canonicalMailText(event[field]);
+  }
+  const addresses = (map: RecordValue) => Object.fromEntries(Object.entries(map).map(([key, address]) =>
+    [key, typeof address === 'string' ? canonicalMailText(address) : address]));
+  if (isRecord(event.replyTo)) event.replyTo = addresses(event.replyTo);
+  if (isRecord(event.participants)) {
+    event.participants = Object.fromEntries(Object.entries(event.participants).map(([id, participant]) => {
+      if (!isRecord(participant)) return [id, participant];
+      const shown = { ...participant };
+      for (const field of ['name', 'email', 'calendarAddress']) {
+        if (typeof shown[field] === 'string') shown[field] = canonicalMailText(shown[field]);
+      }
+      if (isRecord(shown.sendTo)) shown.sendTo = addresses(shown.sendTo);
+      return [id, shown];
+    }));
+  }
+  return event as T;
+}
+
 /** Prefer the server's existing canonical identities, keeping their real IDs. */
 export function canonicalIdentities(values: unknown[]): unknown[] {
   const emails = new Set(values.flatMap(value => isRecord(value) && typeof value.email === 'string'
@@ -103,8 +134,8 @@ export function canonicalMailResponse<T extends Response>(response: T): T {
     if (name === 'SearchSnippet/get') return [name, { ...result, list: result.list.map(snippet => {
       if (!isRecord(snippet)) return snippet;
       return { ...snippet,
-        ...(typeof snippet.subject === 'string' ? { subject: canonicalMailText(snippet.subject) } : {}),
-        ...(typeof snippet.preview === 'string' ? { preview: canonicalMailText(snippet.preview) } : {}),
+        ...(typeof snippet.subject === 'string' ? { subject: canonicalSearchSnippet(snippet.subject) } : {}),
+        ...(typeof snippet.preview === 'string' ? { preview: canonicalSearchSnippet(snippet.preview) } : {}),
       };
     }) }, id];
     return [name, result, id];

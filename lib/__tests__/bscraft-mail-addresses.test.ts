@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { JMAPClient } from '../jmap/client';
-import { canonicalEmail, canonicalIdentities, canonicalMailCalls, canonicalMailResponse, canonicalMailText, withLegacyMailSearch } from '../bscraft-mail-addresses';
+import { canonicalCalendarInvitation, canonicalEmail, canonicalIdentities, canonicalMailCalls, canonicalMailResponse, canonicalMailText, canonicalSearchSnippet, withLegacyMailSearch } from '../bscraft-mail-addresses';
+import { getInvitationTrustAssessment } from '../calendar-invitation';
 
 describe('corporate mail address presentation', () => {
   afterEach(() => vi.restoreAllMocks());
@@ -24,6 +25,35 @@ describe('corporate mail address presentation', () => {
     for (const value of ['x@bslabs.tech.evil', 'x@bslabs.tech-extra', 'x@other.tech', 'https://bslabs.tech']) {
       expect(canonicalMailText(value)).toBe(value);
     }
+  });
+
+  it('canonicalizes addresses split by server search highlights without interpreting markup', () => {
+    expect(canonicalSearchSnippet('<mark>inbox</mark><mark>@</mark><mark>bslabs</mark><mark>.</mark><mark>tech</mark> accepted'))
+      .toBe('inbox@bscraft.ru accepted');
+    expect(canonicalSearchSnippet('inbox@<mark>bslabs</mark>.<mark>tech</mark> &lt;script&gt;'))
+      .toBe('inbox@bscraft.ru &lt;script&gt;');
+    expect(canonicalSearchSnippet('x@<mark>bslabs.tech.evil</mark>')).toBe('x@<mark>bslabs.tech.evil</mark>');
+    expect(canonicalSearchSnippet('<mark>ordinary</mark> search')).toBe('<mark>ordinary</mark> search');
+  });
+
+  it('projects parsed invitation addresses with stable IDs and unchanged authentication results', async () => {
+    const original = { uid: 'original@bslabs.tech', organizerCalendarAddress: 'mailto:i.bezgin@bslabs.tech',
+      participants: { organizer: { email: 'i.bezgin@bslabs.tech', roles: { owner: true }, sendTo: { imip: 'mailto:i.bezgin@bslabs.tech' } } } };
+    const client = new JMAPClient('https://mail.example.com', 'test', 'test');
+    Object.assign(client, { apiUrl: 'https://mail.example.com/jmap', accountId: 'account-1' });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      methodResponses: [['CalendarEvent/parse', { parsed: { originalBlob: [original] } }, '0']],
+    }), { status: 200 }));
+    const [event] = await client.parseCalendarEvents('account-1', 'originalBlob');
+    expect(event.uid).toBe(original.uid);
+    expect(Object.keys(event.participants!)).toEqual(['organizer']);
+    expect(event.organizerCalendarAddress).toBe('mailto:i.bezgin@bscraft.ru');
+    expect(event.participants!.organizer.email).toBe('i.bezgin@bscraft.ru');
+    expect(event.participants!.organizer.sendTo!.imip).toBe('mailto:i.bezgin@bscraft.ru');
+    expect(original.participants.organizer.email).toBe('i.bezgin@bslabs.tech');
+    const failed = { from: [{ email: 'i.bezgin@bscraft.ru' }], authenticationResults: { dmarc: { result: 'fail' as const } } };
+    expect(getInvitationTrustAssessment(event, failed, 'request').reason).toBe('authentication_failed');
+    expect(canonicalCalendarInvitation(event)).toEqual(event);
   });
 
   it('uses existing canonical sender IDs and preserves identities without a replacement', async () => {

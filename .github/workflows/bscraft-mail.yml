@@ -21,7 +21,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npx vitest run lib/__tests__/bscraft-mail-addresses.test.ts lib/__tests__/jmap-*.test.ts --pool=forks --maxWorkers=2 --testTimeout=15000
+      - run: npx vitest run lib/__tests__/bscraft-mail-addresses.test.ts lib/__tests__/jmap-*.test.ts lib/__tests__/calendar-invitation.test.ts lib/__tests__/calendar-event-normalization.test.ts --pool=forks --maxWorkers=2 --testTimeout=15000
       - run: npm run typecheck
       - run: npx eslint lib/bscraft-mail-addresses.ts lib/jmap/client.ts stores/email-store.ts lib/__tests__/bscraft-mail-addresses.test.ts
   publish:
