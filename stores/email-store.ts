@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { canonicalEmail } from '@/lib/bscraft-mail-addresses';
 import { Email, Mailbox, StateChange, ScheduledEmail, SendEmailResult, isUnifiedMailboxId, isCrossViewId } from "@/lib/jmap/types";
 import type { UnifiedMailboxRole, CrossView } from "@/lib/jmap/types";
 import type { IJMAPClient, SearchEmailsResult } from "@/lib/jmap/client-interface";
@@ -6765,7 +6766,7 @@ if (typeof window !== 'undefined') {
           searchMailboxId: defaultSearchScopeFor(snap.mailboxes, selectedMailbox),
           ...(selectedMailbox === snapMailbox && Array.isArray(snap.emails) && snap.emails.length > 0
             ? {
-                emails: snap.emails,
+                emails: snap.emails.map(canonicalEmail),
                 totalEmails: typeof snap.totalEmails === 'number' ? snap.totalEmails : snap.emails.length,
                 hasMoreEmails: !!snap.hasMoreEmails,
                 // The order the rows were fetched in; the list is drawn sorted
