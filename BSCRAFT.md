@@ -13,6 +13,9 @@ The projection does not update server mail objects, MIME blobs, Message-IDs,
 thread IDs, attachments, authentication results or signature fields. Original
 message downloads remain available. Outgoing JMAP mutation requests are passed
 through; the server's existing canonical identities determine the sender.
+When both domain aliases have sender identities, the client uses the existing
+canonical identity and its real server ID. The legacy identity stays stored for
+compatibility. Display names and compose signatures use the canonical domain.
 
 Set `SOURCE_CODE_URL` to this repository and revision when deploying. The
 upstream license and notices are retained. The build publishes a SHA-pinned
