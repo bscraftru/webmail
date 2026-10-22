@@ -8,6 +8,10 @@ participants, subject/preview and decoded message bodies. Replies use the
 canonical participant addresses. Search for a canonical address covers both
 domains, including negated filters. Browser list snapshots receive the same
 projection when restored.
+Search excerpts containing a migrated address omit server highlight markers so
+split address tokens remain readable. Parsed mail invitation cards show the
+canonical participant addresses while their source ICS, event UID, participant
+IDs and authentication results remain intact.
 
 The projection does not update server mail objects, MIME blobs, Message-IDs,
 thread IDs, attachments, authentication results or signature fields. Original
