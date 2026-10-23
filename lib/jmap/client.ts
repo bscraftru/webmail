@@ -1,6 +1,7 @@
 import { ArchiveEmailsError } from "./archive-error";
 import { generateUUID } from '@/lib/utils';
 import { canonicalCalendarInvitation, canonicalMailCalls, canonicalMailResponse } from '@/lib/bscraft-mail-addresses';
+import { buildPlainMime } from '@/lib/bscraft-plain-mime';
 import type { Attachment, Email, Mailbox, MailboxRights, StateChange, AccountStates, CollectionChanges, ShareNotification, BusyPeriod, CalendarParticipantIdentity, CalendarEventNotification, Thread, Identity, EmailAddress, ContactCard, AddressBook, AddressBookRights, VacationResponse, Calendar, CalendarComponentType, CalendarRights, CalendarEvent, CalendarEventFilter, CalendarTask, CreateCalendarOptions, FileNode, FileNodeFilter, FileNodeRights, Principal, PrincipalAvailability, PrincipalListing, PushSubscription, EmailPushConfig, DeliveryStatus, EmailSubmission, RejectedRecipient, ScheduledEmail, SendEmailResult, SharedAccount } from "./types";
 import type { SieveScript, SieveCapabilities } from "./sieve-types";
 import type { BlobBatch, CalendarEventUpdateOptions, CalendarQueryOptions, FileNodeListings, IJMAPClient, KeywordDiscoveryResult, KeywordInfo, KeywordMigration, SearchEmailsResult, SearchRequestOptions } from "./client-interface";
@@ -4774,6 +4775,40 @@ export class JMAPClient implements IJMAPClient {
       }));
     }
 
+    // Import plain corporate mail as complete SMTP-format MIME. Email/set's
+    // MIME rendering differs from the recipient-confirmed SMTP/import path.
+    // Rich messages and attachments retain their original representation.
+    const plainAddresses = [
+      ...(emailCreate.from as EmailAddress[]),
+      ...(emailCreate.to as EmailAddress[]),
+      ...((emailCreate.cc as EmailAddress[] | undefined) || []),
+      ...(identityReplyTo || []),
+    ];
+    const usePlainMime = !htmlBody && !attachments?.length
+      && (fromEmail || this.username).toLowerCase().endsWith('@bscraft.ru')
+      // International mailbox addresses still need the server's SMTPUTF8 path.
+      // eslint-disable-next-line no-control-regex
+      && plainAddresses.every(item => /^[^\s<>\x00-\x20\x7f-\uffff]+@[^\s<>\x00-\x20\x7f-\uffff]+$/.test(item.email));
+    const createMethod = usePlainMime ? 'Email/import' : 'Email/set';
+    let importedBlobId: string | undefined;
+    if (usePlainMime) {
+      const raw = buildPlainMime({
+        from: (emailCreate.from as EmailAddress[])[0],
+        to: emailCreate.to as EmailAddress[],
+        cc: emailCreate.cc as EmailAddress[] | undefined,
+        replyTo: identityReplyTo,
+        subject,
+        text: body,
+        messageId: (emailCreate.messageId as string[])[0],
+        date: new Date(),
+        inReplyTo: normalizedInReplyTo,
+        references: normalizedReferences,
+        requestReadReceipt: options?.requestReadReceipt,
+      });
+      const uploaded = await this.uploadBlob(new File([raw], 'message.eml', { type: 'message/rfc822' }), targetAccountId);
+      importedBlobId = uploaded.blobId;
+    }
+
     const methodCalls: JMAPMethodCall[] = [];
 
     // Use onSuccessUpdateEmail to move from Drafts to Sent after submission.
@@ -4795,7 +4830,7 @@ export class JMAPClient implements IJMAPClient {
       const parameters = submissionEnvelopeParameters(options, holdForSeconds);
       const hasMailFromParams = Object.keys(parameters.mailFrom).length > 0;
       const hasRcptToParams = Object.keys(parameters.rcptTo).length > 0;
-      if (hasMailFromParams || hasRcptToParams || mailFrom.toLowerCase() !== identityMailFrom.toLowerCase()) {
+      if (usePlainMime || hasMailFromParams || hasRcptToParams || mailFrom.toLowerCase() !== identityMailFrom.toLowerCase()) {
         const envelopeRecipients = normalizeEnvelopeRecipients([...to, ...(cc || []), ...(bcc || [])]);
         create.envelope = {
           mailFrom: {
@@ -4820,9 +4855,13 @@ export class JMAPClient implements IJMAPClient {
     // same request meant a failed create/submission - e.g. the outgoing email
     // referencing part blobs of that very draft, which die with it - still
     // deleted the user's only copy of the message.
-    methodCalls.push(["Email/set", {
+    methodCalls.push([createMethod, {
       accountId: targetAccountId,
-      create: { [emailId]: emailCreate },
+      ...(usePlainMime ? { emails: { [emailId]: {
+        blobId: importedBlobId,
+        mailboxIds: { [draftsMailbox.id]: true },
+        keywords: { '$seen': true, '$draft': true },
+      } } } : { create: { [emailId]: emailCreate } }),
     }, "0"]);
     methodCalls.push(["EmailSubmission/set", {
       accountId: submissionAccountId,
@@ -4845,7 +4884,7 @@ export class JMAPClient implements IJMAPClient {
     //   (#1009).
     // Stalwart checks the quota first, so both can happen, one after the other.
     const draftCopyId = response.methodResponses
-      ?.find(([name]) => name === 'Email/set')?.[1]?.created?.[emailId]?.id as string | undefined;
+      ?.find(([name]) => name === createMethod)?.[1]?.created?.[emailId]?.id as string | undefined;
     let mailFrom = firstMailFrom;
     let madeRoom = false;
     for (;;) {
@@ -4871,7 +4910,7 @@ export class JMAPClient implements IJMAPClient {
       response = {
         ...retry,
         methodResponses: [
-          ...response.methodResponses.filter(([name]) => name === 'Email/set'),
+          ...response.methodResponses.filter(([name]) => name === createMethod),
           ...(retry.methodResponses ?? []),
         ],
       };
@@ -4956,7 +4995,7 @@ export class JMAPClient implements IJMAPClient {
           filingError = filingError ?? (first?.description || first?.type || 'old draft cleanup failed');
         }
 
-        if (methodName === 'Email/set' && result.created?.[emailId]?.id) {
+        if (methodName === createMethod && result.created?.[emailId]?.id) {
           createdEmailId = result.created[emailId].id;
         }
         if (methodName === 'EmailSubmission/set' && result.created?.['1']?.id) {
