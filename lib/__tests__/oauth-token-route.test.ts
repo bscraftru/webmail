@@ -24,12 +24,14 @@ const buildOAuthParams = vi.fn();
 const getMetadata = vi.fn();
 const getRequiredConfig = vi.fn();
 const exchangeCodeForTokens = vi.fn();
+const defaultClientOptions = vi.fn(async (_serverId?: unknown) => ({ fallbackClientId: 'bulwark-webmail' }));
 vi.mock('@/lib/oauth/token-exchange', () => ({
   exchangeCodeForTokens: (...args: unknown[]) => exchangeCodeForTokens(...args),
   buildOAuthParams: (...args: unknown[]) => buildOAuthParams(...args),
   getMetadata: (...args: unknown[]) => getMetadata(...args),
   getRequiredConfig: (...args: unknown[]) => getRequiredConfig(...args),
   getTokenEndpoint: (...args: unknown[]) => getTokenEndpoint(...args),
+  defaultClientOptions: (serverId: unknown) => defaultClientOptions(serverId),
   DEFAULT_CLIENT_ID: 'bulwark-webmail',
 }));
 
@@ -279,6 +281,29 @@ describe('oauth token route - access token cache (#552)', () => {
       null,
       { fallbackClientId: 'bulwark-webmail' },
     );
+  });
+
+  it('refreshes with the client the TOTP login registered on Stalwart 1.0', async () => {
+    // 1.0 knows no client named bulwark-webmail; the login signed in with a
+    // client it registered, and a refresh naming another client is refused.
+    defaultClientOptions.mockResolvedValueOnce({ fallbackClientId: 'swc1.registered' });
+    cookieStore.set('jmap_rt', 'totp-minted-refresh-token');
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ access_token: 'fresh-token', expires_in: 1800, refresh_token: 'rotated' }),
+    });
+
+    const { status } = await callPut({ force: 'true' });
+
+    expect(status).toBe(200);
+    expect(defaultClientOptions).toHaveBeenCalledWith(null);
+    expect(buildOAuthParams).toHaveBeenCalledWith(
+      { grant_type: 'refresh_token', refresh_token: 'totp-minted-refresh-token' },
+      null,
+      { fallbackClientId: 'swc1.registered' },
+    );
+    // 1.0 rotates refresh tokens; the old one is dead once the new one is used.
+    expect(cookieStore.get('jmap_rt')?.value).toBe('rotated');
   });
 
   it('does not serve a cached token once the refresh token is gone', async () => {
@@ -605,6 +630,52 @@ describe('oauth token route - sign-out (#905)', () => {
   it('does not offer a provider logout the provider does not advertise', async () => {
     seedSlot(0);
     getMetadata.mockResolvedValue({ ...KEYCLOAK, end_session_endpoint: undefined });
+
+    const { body } = await callRoute('DELETE', { slot: '0', end_session: 'true' });
+
+    expect(body.end_session_url).toBeUndefined();
+  });
+
+  // Stalwart's built-in provider advertises no end_session_endpoint (#1279).
+  it('builds the provider logout from the configured URL when discovery has none', async () => {
+    seedSlot(0);
+    getMetadata.mockResolvedValue({ ...KEYCLOAK, end_session_endpoint: undefined });
+    getRequiredConfig.mockReturnValue({ clientId: 'webmail', endSessionUrl: 'https://mail.example.org/logout/' });
+    configValues.oauthPostLogoutRedirectUri = 'https://mail.example.com/en/login';
+
+    const { body } = await callRoute('DELETE', { slot: '0', end_session: 'true' });
+
+    const url = new URL(body.end_session_url as string);
+    expect(`${url.origin}${url.pathname}`).toBe('https://mail.example.org/logout/');
+    expect(url.searchParams.get('client_id')).toBe('webmail');
+    expect(url.searchParams.get('id_token_hint')).toBe(ID_TOKEN);
+    expect(url.searchParams.get('post_logout_redirect_uri')).toBe('https://mail.example.com/en/login');
+  });
+
+  it('prefers the configured logout URL over the discovered one', async () => {
+    seedSlot(0);
+    getRequiredConfig.mockReturnValue({ clientId: 'webmail', endSessionUrl: 'https://sso.example.com/logout' });
+
+    const { body } = await callRoute('DELETE', { slot: '0', end_session: 'true' });
+
+    const url = new URL(body.end_session_url as string);
+    expect(`${url.origin}${url.pathname}`).toBe('https://sso.example.com/logout');
+  });
+
+  it('does not use the configured logout URL when the admin turned provider logout off', async () => {
+    seedSlot(0);
+    getRequiredConfig.mockReturnValue({ clientId: 'webmail', endSessionUrl: 'https://sso.example.com/logout' });
+    configValues.oauthEndSession = false;
+
+    const { body } = await callRoute('DELETE', { slot: '0', end_session: 'true' });
+
+    expect(body.end_session_url).toBeUndefined();
+  });
+
+  it('does not offer a configured logout URL over plain http', async () => {
+    seedSlot(0);
+    getMetadata.mockResolvedValue({ ...KEYCLOAK, end_session_endpoint: undefined });
+    getRequiredConfig.mockReturnValue({ clientId: 'webmail', endSessionUrl: 'http://mail.example.org/logout' });
 
     const { body } = await callRoute('DELETE', { slot: '0', end_session: 'true' });
 

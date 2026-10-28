@@ -12,12 +12,14 @@ import { isDeclinedByUser } from "@/lib/calendar-participants";
 import type { CalendarEvent, Calendar, CalendarTask } from "@/lib/jmap/types";
 import { useAuthStore } from "@/stores/auth-store";
 import { useCalendarStore } from "@/stores/calendar-store";
+import { movedEventUpdates } from "@/lib/calendar-participants";
 import { useSettingsStore } from "@/stores/settings-store";
 import type { PendingEventPreview } from "./event-modal";
 import { toast } from "@/stores/toast-store";
 import { useCalendarLocale } from "@/hooks/use-calendar-locale";
 import { useScrollWindow } from "@/hooks/use-scroll-window";
 import { dayKey, parseDayKey, type ScrollWindowViewProps } from "@/lib/calendar-scroll-window";
+import { useCalendarErrorMessage } from "@/hooks/use-calendar-error-message";
 import { PluginDayLabel } from "./plugin-day-label";
 
 interface CalendarMonthViewProps extends ScrollWindowViewProps {
@@ -39,7 +41,10 @@ interface CalendarMonthViewProps extends ScrollWindowViewProps {
   tasks?: CalendarTask[];
   onToggleTaskComplete?: (task: CalendarTask) => void;
   onSelectTask?: (task: CalendarTask) => void;
-  /** The user's calendar addresses, to mark events they declined (#1110). */
+  /**
+   * The user's calendar addresses, to mark events they declined (#1110).
+   * Moving an event they organize also asks its attendees again.
+   */
   currentUserEmails?: string[];
 }
 
@@ -74,6 +79,7 @@ export function CalendarMonthView({
   currentUserEmails,
 }: CalendarMonthViewProps) {
   const t = useTranslations("calendar");
+  const describeError = useCalendarErrorMessage();
   const showTimeInMonthView = useSettingsStore((state) => state.showTimeInMonthView);
   // On mobile the month view collapses events to dots unless the user opted
   // into full entries via "Show time in month view" (#666).
@@ -155,21 +161,29 @@ export function CalendarMonthView({
   }, [events, weeks, tasksByDate]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const headerRef = useRef<HTMLDivElement>(null);
   const topSentinelRef = useRef<HTMLDivElement>(null);
   const bottomSentinelRef = useRef<HTMLDivElement>(null);
 
   // Six rows fill the viewport, as a single month used to; taller rows grow
   // with their chips.
   const [viewportHeight, setViewportHeight] = useState(0);
+  const [headerHeight, setHeaderHeight] = useState(0);
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => setViewportHeight(el.clientHeight));
+    const observer = new ResizeObserver(() => {
+      setViewportHeight(el.clientHeight);
+      if (headerRef.current) setHeaderHeight(headerRef.current.offsetHeight);
+    });
     observer.observe(el);
+    if (headerRef.current) observer.observe(headerRef.current);
     setViewportHeight(el.clientHeight);
+    if (headerRef.current) setHeaderHeight(headerRef.current.offsetHeight);
     return () => observer.disconnect();
   }, []);
-  const rowMinHeight = Math.max(baseRowMinHeight, Math.floor(viewportHeight / 6));
+  const availableHeight = Math.max(0, viewportHeight - headerHeight);
+  const rowMinHeight = Math.max(baseRowMinHeight, Math.floor(availableHeight / 6));
   // On wide screens a week keeps its height: a day with more entries than
   // fit shows the first ones and a "N more" link (as in Google Calendar).
   // Phones keep growing the row to fit.
@@ -185,7 +199,8 @@ export function CalendarMonthView({
   const sampleVisibleMonth = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const sampleY = el.getBoundingClientRect().top + el.clientHeight * VISIBLE_MONTH_SAMPLE;
+    const hHeight = headerRef.current?.offsetHeight ?? 0;
+    const sampleY = el.getBoundingClientRect().top + hHeight + (el.clientHeight - hHeight) * VISIBLE_MONTH_SAMPLE;
     const rows = el.querySelectorAll<HTMLElement>("[data-week]");
     let hit: HTMLElement | null = null;
     for (const row of rows) {
@@ -217,7 +232,8 @@ export function CalendarMonthView({
     const targetKey = dayKey(grid[0] ?? focus.date);
     const row = el.querySelector<HTMLElement>(`[data-week="${targetKey}"]`);
     if (row) {
-      el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top;
+      const hHeight = headerRef.current?.offsetHeight ?? 0;
+      el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top - hHeight;
     }
     visibleMonthRef.current = focus.date;
     setVisibleMonthDate(focus.date);
@@ -270,31 +286,34 @@ export function CalendarMonthView({
       if (newStartISO === data.originalStart) return;
       const client = useAuthStore.getState().client;
       if (!client) return;
-      const hasParticipants = event?.participants && Object.keys(event.participants).length > 0;
-      await useCalendarStore.getState().updateEvent(client, data.eventId, { start: newStartISO }, hasParticipants || undefined);
-    } catch {
-      toast.error(t("notifications.event_move_error"));
+      const moved = movedEventUpdates(event, { start: newStartISO }, currentUserEmails ?? []);
+      await useCalendarStore.getState().updateEvent(client, data.eventId, moved.updates, moved.sendSchedulingMessages);
+    } catch (error) {
+      toast.error(describeError(error, t("notifications.event_move_error")));
     }
-  }, [t]);
+  }, [t, describeError, currentUserEmails]);
 
   return (
     <div className="flex flex-col flex-1 overflow-hidden" role="grid" aria-label={formatFullDate(selectedDate)}>
-      <div className="grid grid-cols-7 border-b border-border" role="row">
-        {dayHeaderKeys.map((d) => (
-          <div key={d} role="columnheader" className={cn(
-            "text-center text-xs font-medium text-muted-foreground py-2 border-e border-border last:border-e-0",
-            isMobile && "py-1.5 text-[11px]"
-          )}>
-            {isMobile ? t(`days.${d}`).slice(0, 2) : t(`days.${d}`)}
-          </div>
-        ))}
-      </div>
-
       <div
         ref={scrollRef}
         className="flex-1 flex flex-col overflow-y-auto [overflow-anchor:none]"
         onScroll={handleScroll}
       >
+        <div
+          ref={headerRef}
+          className="sticky top-0 z-50 bg-background grid grid-cols-7 border-b border-border"
+          role="row"
+        >
+          {dayHeaderKeys.map((d) => (
+            <div key={d} role="columnheader" className={cn(
+              "text-center text-xs font-medium text-muted-foreground py-2 border-e border-border last:border-e-0",
+              isMobile && "py-1.5 text-[11px]"
+            )}>
+              {isMobile ? t(`days.${d}`).slice(0, 2) : t(`days.${d}`)}
+            </div>
+          ))}
+        </div>
         <div ref={topSentinelRef} data-testid="month-top-sentinel" className="h-px flex-shrink-0" />
         {weekSegments.map(({ week, segments, rowCount, dayEventRows, dayTasks, contentRows }) => {
           const overflowing = capRows && contentRows > rowCapacity;

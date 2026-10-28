@@ -5,12 +5,32 @@ import { useTranslations } from 'next-intl';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useAuthStore } from '@/stores/auth-store';
+import { usePolicyStore } from '@/stores/policy-store';
+import { useConfig } from '@/hooks/use-config';
 import { decryptArchive, encryptArchive, ARCHIVE_MIN_PASSWORD, type ArchiveOwner } from '@/lib/account-archive';
-import { collectAccounts, fetchArchive, putArchive, removeArchive, restoreAccounts } from '@/lib/account-archive-client';
+import { collectAccounts, fetchArchive, putArchive, removeArchive, restoreArchive } from '@/lib/account-archive-client';
 import { toUnicodeEmail } from '@/lib/idn';
 import { SettingsSection } from './settings-section';
 
 const KNOWN_ERRORS = ['mismatch', 'password_length', 'unlock_failed', 'owner_signin_required', 'https_required'];
+
+type BackupT = ReturnType<typeof useTranslations>;
+
+/** The text for a failed save, restore or delete. */
+export function archiveErrorText(t: BackupT, err: unknown): string {
+  const code = err instanceof Error ? err.message : '';
+  return t(`errors.${KNOWN_ERRORS.includes(code) ? code : 'storage_failed'}`);
+}
+
+/** What a restore did, in one status line. */
+export function restoreSummary(t: BackupT, result: Awaited<ReturnType<typeof restoreArchive>>): string {
+  return [
+    t(result.waiting ? 'restored' : 'restored_signed_in', result),
+    result.signedIn ? t('signed_in', { count: result.signedIn }) : '',
+    result.signInFailed ? t('sign_in_failed', { count: result.signInFailed }) : '',
+    result.skipped ? t('skipped', { count: result.skipped }) : '',
+  ].join(' ').trim();
+}
 
 /** Save this browser's account list, encrypted, under the active account; restore it on another device. */
 export function AccountArchiveSettings() {
@@ -18,10 +38,13 @@ export function AccountArchiveSettings() {
   const id = useId();
   const username = useAuthStore(s => s.username);
   const serverUrl = useAuthStore(s => s.serverUrl);
+  const passwordsAllowed = usePolicyStore(s => s.isFeatureEnabled('accountArchivePasswordsEnabled'));
+  const { rememberMeEnabled } = useConfig();
   const [saved, setSaved] = useState<boolean | null>(null);
   const [mode, setMode] = useState<'save' | 'restore' | null>(null);
   const [password, setPassword] = useState('');
   const [confirmation, setConfirmation] = useState('');
+  const [includePasswords, setIncludePasswords] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ error: boolean; text: string } | null>(null);
   const owner: ArchiveOwner | null = username && serverUrl ? { username, serverUrl } : null;
@@ -39,7 +62,7 @@ export function AccountArchiveSettings() {
   if (!owner) return null;
 
   const open = (next: 'save' | 'restore' | null) => {
-    setMode(next); setPassword(''); setConfirmation(''); setMessage(null);
+    setMode(next); setPassword(''); setConfirmation(''); setIncludePasswords(false); setMessage(null);
   };
   const run = async (action: () => Promise<string>) => {
     setBusy(true); setMessage(null);
@@ -48,24 +71,21 @@ export function AccountArchiveSettings() {
       open(null);
       setMessage({ error: false, text });
     }
-    catch (err) {
-      const code = err instanceof Error ? err.message : '';
-      setMessage({ error: true, text: t(`errors.${KNOWN_ERRORS.includes(code) ? code : 'storage_failed'}`) });
-    } finally { setBusy(false); }
+    catch (err) { setMessage({ error: true, text: archiveErrorText(t, err) }); } finally { setBusy(false); }
   };
 
   const save = () => run(async () => {
     if (password !== confirmation) throw new Error('mismatch');
-    const accounts = collectAccounts();
+    const accounts = collectAccounts(passwordsAllowed && includePasswords);
     await putArchive(owner, await encryptArchive(owner, accounts, password));
     setSaved(true);
-    return t('saved', { count: accounts.length });
+    const withPassword = accounts.filter(a => a.password).length;
+    return [t('saved', { count: accounts.length }), withPassword ? t('saved_passwords', { count: withPassword }) : ''].join(' ').trim();
   });
   const restore = () => run(async () => {
     const envelope = await fetchArchive(owner);
     if (!envelope) { setSaved(false); throw new Error('storage_failed'); }
-    const result = restoreAccounts(await decryptArchive(owner, envelope, password));
-    return [t('restored', result), result.skipped ? t('skipped', { count: result.skipped }) : ''].join(' ').trim();
+    return restoreSummary(t, await restoreArchive(await decryptArchive(owner, envelope, password), rememberMeEnabled));
   });
   const remove = () => {
     if (!window.confirm(t('delete_confirm'))) return;
@@ -73,7 +93,7 @@ export function AccountArchiveSettings() {
   };
 
   return (
-    <SettingsSection title={t('title')} description={t('description')}>
+    <SettingsSection id="backup" advanced title={t('title')} description={t(passwordsAllowed ? 'description_passwords' : 'description')}>
       <p className="text-sm text-muted-foreground">
         {saved === null ? '…' : t(saved ? 'status_saved' : 'status_none', { account: toUnicodeEmail(owner.username) })}
       </p>
@@ -105,6 +125,18 @@ export function AccountArchiveSettings() {
                 id={`${id}-confirm`} type="password" value={confirmation} required autoComplete="new-password"
                 onChange={e => setConfirmation(e.target.value)}
               />
+              {passwordsAllowed && (
+                <div className="space-y-1">
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox" checked={includePasswords} aria-describedby={`${id}-passwords-hint`}
+                      onChange={e => setIncludePasswords(e.target.checked)}
+                    />
+                    {t('include_passwords')}
+                  </label>
+                  <p id={`${id}-passwords-hint`} className="text-xs text-muted-foreground ps-6">{t('include_passwords_hint')}</p>
+                </div>
+              )}
             </>
           )}
           <div className="flex flex-wrap gap-2">

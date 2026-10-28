@@ -378,7 +378,9 @@ export function buildCsp({ connectSrc = "*" } = {}) {
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
-    "frame-ancestors 'none'",
+    // 'self' because the PDF preview frames a blob: document, and Safari
+    // applies this policy to that document as well (#1301).
+    "frame-ancestors 'self'",
     "media-src 'self' blob:",
   ].join("; ");
 }
@@ -441,7 +443,7 @@ export function buildHeaders({ basePath = "", connectSrc = "*" }) {
   const csp = buildCsp({ connectSrc });
   return `${basePath || ""}/*
   X-Content-Type-Options: nosniff
-  X-Frame-Options: DENY
+  X-Frame-Options: SAMEORIGIN
   Referrer-Policy: strict-origin-when-cross-origin
   Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
   Content-Security-Policy: ${csp}
@@ -477,7 +479,7 @@ server {
     root ${root};
 
     add_header X-Content-Type-Options nosniff always;
-    add_header X-Frame-Options DENY always;
+    add_header X-Frame-Options SAMEORIGIN always;
     add_header Referrer-Policy strict-origin-when-cross-origin always;
     # connect-src names the JMAP server this bundle was built for. Every page
     # also carries a <meta> policy that allows only its own inline scripts.
@@ -488,7 +490,7 @@ server {
     location ${basePath}/_next/static/ {
         add_header Cache-Control "public, max-age=31536000, immutable" always;
         add_header X-Content-Type-Options nosniff always;
-        add_header X-Frame-Options DENY always;
+        add_header X-Frame-Options SAMEORIGIN always;
         add_header Referrer-Policy strict-origin-when-cross-origin always;
         add_header Content-Security-Policy "${csp}" always;
     }
@@ -534,7 +536,7 @@ export function buildNginxContainerTemplate({ surfaces = LITE_SURFACES } = {}) {
   // location with headers of its own repeats these.
   const securityHeaders = (indent) => [
     "add_header X-Content-Type-Options nosniff always;",
-    "add_header X-Frame-Options DENY always;",
+    "add_header X-Frame-Options SAMEORIGIN always;",
     "add_header Referrer-Policy strict-origin-when-cross-origin always;",
     'add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;',
     `add_header Content-Security-Policy "${csp}" always;`,
@@ -606,7 +608,7 @@ webmail.example.com {
 
     header {
         X-Content-Type-Options nosniff
-        X-Frame-Options DENY
+        X-Frame-Options SAMEORIGIN
         Referrer-Policy strict-origin-when-cross-origin
         # connect-src names the JMAP server this bundle was built for.
         Content-Security-Policy "${csp}"
@@ -660,16 +662,27 @@ ${demoMode ? "Demo mode is ON: the login page offers a built-in demo account and
    - \`rememberMeEnabled\`: \`false\` never remembers a sign-in (sessions then end with the tab).
      Sign-ins are otherwise remembered; \`loginShowRememberMe: true\` lets people choose.
    Optional keys: \`demoMode\`, \`jmapServers\`, \`jmapServerAutoPickByDomain\`, the login logo/company/link keys and \`loginShow*\` toggles (same names as the Docker env vars, camelCased).
-3. Allow the browser to talk to the mail server (CORS). In Stalwart:
+3. Allow the browser to talk to the mail server (CORS). In Stalwart, turn on
+   the \`usePermissiveCors\` setting of the \`Http\` object: in the web admin
+   under **Settings > Network > HTTP > Security** ("Permissive CORS policy"),
+   or with
 
-   \`\`\`toml
-   [http]
-   permissive-cors = true
+   \`\`\`bash
+   stalwart-cli update Http --field usePermissiveCors=true
+   stalwart-cli create Action/ReloadSettings
    \`\`\`
 
-   or an equivalent reverse-proxy rule that allows your Lite origin with the
+   or over JMAP as an administrator: \`x:Http/set\` with
+   \`{"update": {"singleton": {"usePermissiveCors": true}}}\`. It applies once
+   the settings are reloaded (the \`ReloadSettings\` action) or Stalwart
+   restarts. On the current 1.0 pre-releases \`ReloadSettings\` fails while the
+   stock spam-filter rules are loaded, so restart Stalwart there instead.
+   Stalwart 0.16 and later ignore the \`[http] permissive-cors\` key of the old
+   TOML configuration.
+
+   A reverse-proxy rule works too if it allows your Lite origin with the
    \`Authorization\` and \`Content-Type\` headers on \`/.well-known/jmap\`, \`/jmap/*\`,
-   \`/api/auth\` and \`/auth/token\`.
+   \`/api/auth\`, \`/auth/token\` and, for Stalwart 1.0, \`/auth/register\`.
 
 ## Host configuration
 
@@ -1192,6 +1205,16 @@ ${STALWART_OAUTH_META_LITERAL} />
 `;
 }
 
+/**
+ * The bundle manifest Stalwart 1.0 requires at the root of an Application
+ * zip (`stalwart-app.json`, checked before it unpacks anything): without it,
+ * it refuses the bundle with "Application bundle does not contain a manifest"
+ * and serves nothing. 0.16 serves the file like any other.
+ */
+export function buildStalwartAppManifest({ version }) {
+  return { id: "bulwark-webmail", version };
+}
+
 /** manifest.json with relative URLs: they resolve against the manifest's own (mounted) URL. */
 export function buildStalwartManifest({ appName }) {
   return {
@@ -1370,7 +1393,8 @@ export function collectZipEntries(dir) {
 
 /** LITE-README.md for the Stalwart bundle. */
 export function buildStalwartReadme({ version, commit, locales, buildId, demoMode = false }) {
-  const url = `https://github.com/bulwarkmail/webmail/releases/download/v${version}/${STALWART_ZIP_NAME}`;
+  // Release tags carry no "v" prefix (since 1.3.0); a v-URL 404s.
+  const url = `https://github.com/bulwarkmail/webmail/releases/download/${version}/${STALWART_ZIP_NAME}`;
   const latestUrl = `https://github.com/bulwarkmail/webmail/releases/latest/download/${STALWART_ZIP_NAME}`;
   return `# Bulwark Lite ${version} (${commit}) for Stalwart
 
@@ -1381,7 +1405,7 @@ no server URL, no CORS, no second web server.
 
 Build: ${buildId}
 Locales: ${locales.join(", ")}
-Requires: Stalwart 0.16.0 or later (0.16.19 or later to use \`oauthClientId\`).
+Requires: Stalwart 0.16.6 or later (0.16.19 for \`oauthClientId\`), or 1.0.
 ${demoMode ? "\nDemo mode is ON in this build: the login page offers the built-in demo account.\n" : ""}
 ## Install
 
@@ -1394,7 +1418,7 @@ it) and \`actionUpdateApps\`. Any of these is equivalent:
 
 - Web admin: **Settings > Web Applications > Create**, description
   \`Bulwark Webmail\`, resource URL \`${url}\`, URL prefix \`/webmail\`; then run
-  the update-applications action (or restart Stalwart).
+  **Actions > Update applications** (or restart Stalwart).
 - CLI:
 
   \`\`\`bash
@@ -1439,16 +1463,26 @@ admin's own \`admin\` and \`account\`.
 
 The resource URL above names one release, so what Stalwart serves only
 changes when you change it: to update, point \`resourceUrl\` at the new
-release's tag and run \`UpdateApps\` (it always downloads again; a failed
-download keeps the previous bundle online). Every release also carries
+release's tag and run \`UpdateApps\`, which always downloads again.
+
+What a failed download does depends on the Stalwart version. On 0.16.23 the
+running bundle stays online, as on later 0.16 releases and on 1.0.
+Older 0.16 releases and the 1.0 pre-releases
+unmount the Application and drop the cached copy. The next restart,
+\`UpdateApps\` or reload of the Applications (the other nodes of a cluster
+reload them after \`UpdateApps\`) downloads \`resourceUrl\` again and mounts the
+bundle once that works. On every version, a restart after the cached copy
+has expired, with \`resourceUrl\` unreachable, leaves the Application
+unmounted. So check that \`resourceUrl\` downloads before running
+\`UpdateApps\` or restarting. Every release also carries
 \`${STALWART_ZIP_NAME}.sha256\`; check a download with
 \`sha256sum -c ${STALWART_ZIP_NAME}.sha256\` before you switch.
 
 The bundle runs as script on your Stalwart origin, next to the web admin.
 Stalwart checks no hash or signature when it downloads, so a floating URL
 such as \`${latestUrl}\` would run whatever the newest release holds, at the
-next restart or \`UpdateApps\` after \`autoUpdateFrequency\` (default 90
-days). Use it only if you accept that in exchange for automatic updates.
+next restart or \`UpdateApps\` after \`autoUpdateFrequency\` (on 1.0
+\`autoUpdateInterval\`, default 90 days). Use it only if you accept that in exchange for automatic updates.
 
 Open tabs move to the new build on their next navigation (one full page
 load); a freshly opened tab gets it immediately. Nothing stays stuck on old
@@ -1463,11 +1497,24 @@ Passwords (and TOTP codes) go to Stalwart's \`/api/auth\` and are exchanged at
 origin. "Remember me" keeps the refresh token in localStorage, otherwise it
 lives with the tab.
 
+Serve Stalwart over HTTPS. On a plain \`http://\` address other than
+\`localhost\`, browsers withhold the Web Crypto API this sign-in needs, so the
+webmail falls back to a password sign-in that lasts only as long as the tab:
+"Remember me" has no effect and single sign-on does not work.
+
 The OAuth client id is the Application's \`oauthClientId\` (Stalwart writes it
 into index.html) or \`bulwark-webmail\` when that field is empty. If your
 server requires registered OAuth clients, register that client id with the
 redirect URI \`https://<your stalwart host>/<prefix>/\` (for example
 \`https://mail.example.com/webmail/\`), once per prefix you mount.
+
+Stalwart 1.0 always requires registered clients. When it knows no client by
+the default name, the app registers one of its own and signs in with that:
+mail, contacts, calendars and files work, but the account's Stalwart
+settings (password, two-factor authentication, app passwords) do not, since
+1.0 only lets a first-party client manage those. For them, create an
+\`OAuthClient\` with client id \`bulwark-webmail\` (or the \`oauthClientId\`
+you set), \`firstParty\` on, and the redirect URI above.
 
 ### Single sign-on (OpenID Connect)
 
@@ -1501,8 +1548,8 @@ for every account.
 
 The bundle is read-only once Stalwart has unpacked it. To change the app
 name, turn "remember me" off or build any other variant, run the
-**Build Static Lite** workflow (or \`npm run build:lite -- --target=stalwart\`)
-with your settings, publish the resulting \`${STALWART_ZIP_NAME}\` at a URL
+**Build Static Lite** workflow (or, in a throwaway checkout,
+\`npm run build:lite -- --in-place --target=stalwart\`) with your settings, publish the resulting \`${STALWART_ZIP_NAME}\` at a URL
 you control, and use that URL as \`resourceUrl\`. \`config.json\` and
 \`policy.json\` inside the zip take the same keys as in the static-host build.
 
@@ -1517,9 +1564,10 @@ you control, and use that URL as \`resourceUrl\`. \`config.json\` and
 - \`manifest.json\` replaces \`manifest.webmanifest\` (Stalwart would serve the
   latter as \`application/octet-stream\`).
 
-Everything the static-host build leaves out (admin console, plugins,
-settings sync, OAuth/SSO via an external identity provider, web push, office
-editing, ICS subscriptions) is also missing here.
+Everything else the static-host build leaves out (admin console, plugins,
+settings sync, web push, office editing, ICS subscriptions) is also missing
+here. Single sign-on is the exception: it works in this bundle, as described
+above.
 `;
 }
 

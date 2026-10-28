@@ -18,7 +18,7 @@ Everything here is self-contained and separate from the app's root
 Provisioned mailboxes (domain `example.org`, shared password `test-pass-123`):
 `alice`, `bob`, `carol`. Admin: `admin` / `bootstrap-secret`.
 
-### Two things worth knowing
+### Three things worth knowing
 
 - **The webmail runs in Next.js dev mode.** The browser talks JMAP *directly*
   to Stalwart at `http://localhost:8025` (cross-origin, plain HTTP). The app's
@@ -28,6 +28,16 @@ Provisioned mailboxes (domain `example.org`, shared password `test-pass-123`):
 - **CORS.** Stalwart doesn't emit CORS headers by default. The bootstrap enables
   `usePermissiveCors` (see `stalwart/plan-accounts.ndjson.tpl`) so the browser
   origin (`:3000`) may call the JMAP origin (`:8025`).
+- **Directory queries.** The sharing specs look up principals with
+  `Principal/query`, which Stalwart 1.0 refuses (`forbidden`) unless the
+  Sharing setting `allowDirectoryQueries` is on. The bootstrap turns it on
+  (0.16 has the same setting).
+
+The Stalwart release under test is the `STALWART_IMAGE` build argument
+(default `stalwartlabs/stalwart:v0.16`), e.g.
+`STALWART_IMAGE=<a 1.0 image> integration/run-tests.sh`. Remove the volumes
+(`docker compose down -v`) before switching releases: 1.0 cannot open a 0.16
+data directory.
 
 ## Running
 
@@ -158,6 +168,7 @@ because the UI behaviour is currently incomplete. Worth a look:
 | `IT_WEBMAIL_URL`| `http://localhost:3000` | Webmail origin                                        |
 | `IT_JMAP_URL`   | `http://localhost:8025` | Stalwart JMAP/admin base URL                          |
 | `IT_SMTP_PORT`  | `1025`             | Stalwart submission port                                   |
+| `IT_ACCOUNT_USERS` | `alice,bob,carol` | Local parts of the three test accounts, for a stack with other users |
 | `IT_VIDEO`      | `retain-on-failure`| Video capture: `on` records a `.webm` for **every** test; also `off` / `on-first-retry`. Videos land at `integration/test-results/<test>/video.webm` |
 
 Record videos for a whole run (passing tests included):
