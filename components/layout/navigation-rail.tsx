@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
-import { Mail, Calendar, BookUser, HardDrive, Settings, Keyboard, Plus, Shield, LogOut, Check, Search, Puzzle } from "@/components/icons";
+import { Mail, CalendarEvent, Users, Folder, Settings, Keyboard, Plus, Shield, LogOut, Check, Search, Puzzle } from "@/components/icons";
 import { AccountSwitcher } from "./account-switcher";
 import { iconForName } from "@/components/icons";
 import { useConfig } from "@/hooks/use-config";
@@ -66,6 +66,11 @@ interface NavigationRailProps {
    * active app).
    */
   activeItemId?: 'mail' | 'calendar' | 'contacts' | 'files' | 'settings' | null;
+  /**
+   * The admin panel's own rail: shows the Admin entry as the current one,
+   * for password admins too, who are not Stalwart admins.
+   */
+  adminActive?: boolean;
   /**
    * Pro shell only: renders a Search entry that opens the global search
    * palette (#641) instead of navigating anywhere.
@@ -204,6 +209,7 @@ export function NavigationRail({
   onNavigate,
   activeItemId,
   onOpenSearch,
+  adminActive = false,
 }: NavigationRailProps) {
   const t = useTranslations("sidebar");
   const tGlobalSearch = useTranslations("global_search");
@@ -302,9 +308,9 @@ export function NavigationRail({
 
   const navItems: NavItem[] = [
     { id: "mail", icon: Mail, labelKey: "mail", href: "/", badge: inboxUnread },
-    { id: "calendar", icon: Calendar, labelKey: "calendar", href: "/calendar", hidden: !supportsCalendar || !calendarEnabled },
-    { id: "contacts", icon: BookUser, labelKey: "contacts", href: "/contacts", hidden: !supportsContacts || !contactsEnabled },
-    { id: "files", icon: HardDrive, labelKey: "files", href: "/files", hidden: !supportsFiles || !filesEnabled },
+    { id: "calendar", icon: CalendarEvent, labelKey: "calendar", href: "/calendar", hidden: !supportsCalendar || !calendarEnabled },
+    { id: "contacts", icon: Users, labelKey: "contacts", href: "/contacts", hidden: !supportsContacts || !contactsEnabled },
+    { id: "files", icon: Folder, labelKey: "files", href: "/files", hidden: !supportsFiles || !filesEnabled },
   ];
 
   // When the host (e.g. the Pro shell) takes over navigation via `onNavigate`,
@@ -376,7 +382,7 @@ export function NavigationRail({
               )}>
                 <Icon className="w-5 h-5" />
                 {item.badge != null && item.badge > 0 && (
-                  <span className="absolute -top-1.5 -right-2.5 flex items-center justify-center min-w-[16px] h-4 text-[10px] font-bold rounded-full bg-red-500 text-white px-1">
+                  <span aria-hidden="true" className="absolute -top-1.5 -right-2.5 flex items-center justify-center min-w-[16px] h-4 text-[10px] font-bold rounded-full bg-red-500 text-white px-1">
                     {item.badge > 99 ? "99+" : item.badge}
                   </span>
                 )}
@@ -459,17 +465,21 @@ export function NavigationRail({
         })}
 
         {/* Admin (Stalwart admins) - hard nav because /admin lives outside the [locale] tree */}
-        {isStalwartAdmin && (
+        {(isStalwartAdmin || adminActive) && (
           <a
             href={`${getPathPrefix()}/admin`}
             className={cn(
               "flex flex-col items-center justify-center gap-1 py-2 px-1 min-h-[44px] grow shrink-0 basis-[64px]",
               "transition-colors duration-150",
-              "text-muted-foreground hover:text-foreground"
+              adminActive ? "text-primary" : "text-muted-foreground hover:text-foreground"
             )}
+            aria-current={adminActive ? "page" : undefined}
           >
             <span className="relative">
               <Shield className="w-5 h-5" />
+              {adminActive && !mountainView && (
+                <span className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-4 h-0.5 rounded-full bg-primary" />
+              )}
               {hasUpdate && (
                 <span
                   className={cn(
@@ -578,13 +588,14 @@ export function NavigationRail({
                   : "text-muted-foreground hover:bg-muted hover:text-foreground"
               )}
               aria-current={isActive ? "page" : undefined}
+              aria-label={t(item.labelKey)}
               title={collapsed ? t(item.labelKey) : undefined}
               style={collapsed ? undefined : { paddingBlock: 'var(--density-sidebar-py)' }}
             >
               <Icon className={cn("w-[18px] h-[18px] flex-shrink-0", isActive && "text-primary")} />
               {!collapsed && <span className="truncate">{t(item.labelKey)}</span>}
               {item.badge != null && item.badge > 0 && (
-                <span className={cn(
+                <span aria-hidden="true" className={cn(
                   "absolute flex items-center justify-center min-w-[16px] h-4 text-[10px] font-bold rounded-full bg-red-500 text-white px-1",
                   collapsed ? "-top-0.5 -right-0.5" : "right-1.5"
                 )}>
@@ -695,11 +706,15 @@ export function NavigationRail({
 
       {/* Footer: Admin + Settings + Help + Storage Quota + Sign Out + Push Status */}
       <div className="mt-auto flex flex-col items-center gap-2 pb-3 px-1">
-        {isStalwartAdmin && (
+        {(isStalwartAdmin || adminActive) && (
           <a
             href={`${getPathPrefix()}/admin`}
-            className="flex items-center justify-center w-10 h-10 rounded-md transition-colors text-muted-foreground hover:text-foreground hover:bg-muted relative"
+            className={cn(
+              "flex items-center justify-center w-10 h-10 rounded-md transition-colors relative",
+              adminActive ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground hover:bg-muted",
+            )}
             title={t("admin") || "Admin"}
+            aria-current={adminActive ? "page" : undefined}
           >
             <Shield className="w-[18px] h-[18px]" />
             {hasUpdate && (

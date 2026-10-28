@@ -5,8 +5,9 @@ import { DOMSerializer } from "@tiptap/pm/model";
 import { NodeSelection, Plugin, PluginKey, Selection, TextSelection } from "@tiptap/pm/state";
 import type { Editor } from "@tiptap/react";
 
+import { addParagraphSpacing, addTrailingParagraphBreaks } from "@/components/email/paragraph-breaks";
 import { buildSignatureBlock } from "@/components/email/signature-block";
-import { parkRemoteResources, restoreRemoteResources } from "@/lib/email-sanitization";
+import { parkRemoteResources, restoreRemoteResources, sanitizeComposerIslandHtml } from "@/lib/email-sanitization";
 import { useSettingsStore } from "@/stores/settings-store";
 
 // Marker attribute that identifies the quoted-original wrapper in serialized
@@ -24,6 +25,13 @@ const ATOM_BLOCKS = new Set(["quotedHtml", "signatureBlock"]);
 // Reusable style for the quote bar when quoting email text (like in a reply).
 const QUOTE_BAR_STYLE =
   "border-left:2px solid #c5c5c5;padding-left:12px;margin-top:8px;";
+
+// Editor-only, never serialized into the sent mail: the quoted original is a
+// sender's HTML rendered in the app document (the shadow root isolates its
+// styles, not its layout), so a `position:fixed` element in it would cover
+// the composer and the app with whatever the sender drew. `contain:paint`
+// with a positioned, clipping box confines painting to the quote's own box.
+const QUOTE_ISLAND_CONTAINMENT_STYLE = "position:relative;overflow:hidden;contain:paint;";
 
 /**
  * QuotedHtml — an atomic block node that carries the *verbatim* HTML of a
@@ -53,12 +61,18 @@ export const QuotedHtml = TiptapNode.create({
 
   addAttributes() {
     return {
+      showQuoteBorder: {
+        default: true,
+        parseHTML: (el) => el.getAttribute("data-quote-border") !== "false",
+        renderHTML: (attrs) => attrs.showQuoteBorder === false ? { "data-quote-border": "false" } : {},
+      },
       html: {
         default: "",
         // Capture the verbatim inner HTML when parsing. Because the node is
         // an atom, ProseMirror does NOT descend into the children, so they
-        // never hit the schema.
-        parseHTML: (el) => el.innerHTML,
+        // never hit the schema - nor its attribute allowlist, so sanitize
+        // here: a re-opened draft hands this wrapper in unsanitized.
+        parseHTML: (el) => sanitizeComposerIslandHtml(el.innerHTML),
         // Not rendered as an attribute - the real content round-trips via the
         // custom serializer. renderHTML below only needs the wrapper.
         renderHTML: () => ({}),
@@ -129,7 +143,11 @@ export const QuotedHtml = TiptapNode.create({
       const dom = document.createElement("div");
       dom.setAttribute(QUOTED_HTML_MARKER, "");
       dom.className = "quoted-html-island";
-      dom.style.cssText = QUOTE_BAR_STYLE;
+      const updateQuoteStyle = (showBorder: boolean) => {
+        dom.style.cssText = (showBorder ? QUOTE_BAR_STYLE : "margin-top:8px;")
+          + QUOTE_ISLAND_CONTAINMENT_STYLE;
+      };
+      updateQuoteStyle(node.attrs.showQuoteBorder !== false);
 
       // CRITICAL: render the quoted email inside a Shadow Root. The app's
       // global CSS (Tailwind preflight, .tiptap table/td rules, box-sizing
@@ -209,6 +227,7 @@ export const QuotedHtml = TiptapNode.create({
         },
         update: (updatedNode) => {
           if (updatedNode.type.name !== "quotedHtml") return false;
+          updateQuoteStyle(updatedNode.attrs.showQuoteBorder !== false);
           // Don't clobber the caret while the user is redacting inside.
           if (!focused && (updatedNode.attrs.html || "") !== renderedHtml) {
             render(updatedNode.attrs.html || "");
@@ -235,12 +254,19 @@ export const QuotedHtml = TiptapNode.create({
 export function serializeEditorContent(editor: Editor): string {
   const serializer = DOMSerializer.fromSchema(editor.schema);
   const parts: string[] = [];
-  editor.state.doc.forEach((node) => {
+  // Empty paragraphs at the very end (the editor keeps one after a quote)
+  // stay invisible; every other empty line gets a <br> so it keeps its
+  // height in the recipient's client (#1015).
+  let lastLine = -1;
+  editor.state.doc.forEach((node, _offset, index) => {
+    if (node.type.name !== "paragraph" || node.childCount > 0) lastLine = index;
+  });
+  editor.state.doc.forEach((node, _offset, index) => {
     if (node.type.name === "quotedHtml") {
       // Emit the SAME wrapper buildQuotedHtmlBlock produces, so a saved draft
       // round-trips: re-opening parses this back into a QuotedHtml node
       // instead of letting the schema mangle the raw table layout again.
-      parts.push(buildQuotedHtmlBlock((node.attrs.html as string) || ""));
+      parts.push(buildQuotedHtmlBlock((node.attrs.html as string) || "", { showQuoteBorder: node.attrs.showQuoteBorder !== false }));
       return;
     }
     if (node.type.name === "signatureBlock") {
@@ -253,6 +279,8 @@ export function serializeEditorContent(editor: Editor): string {
     const fragment = serializer.serializeNode(node);
     const tmp = document.createElement("div");
     tmp.appendChild(fragment);
+    if (index <= lastLine) addTrailingParagraphBreaks(tmp);
+    addParagraphSpacing(tmp);
     parts.push(tmp.innerHTML);
   });
   return parts.join("");
@@ -268,8 +296,32 @@ export function serializeEditorContent(editor: Editor): string {
  */
 export function buildQuotedHtmlBlock(
   sanitizedInnerHtml: string,
-  opts: { remoteAllowed?: boolean } = {},
+  opts: { remoteAllowed?: boolean; showQuoteBorder?: boolean } = {},
 ): string {
+  const showQuoteBorder = opts.showQuoteBorder !== false;
+  let html = sanitizedInnerHtml;
+  if (!showQuoteBorder) {
+    // Outlook-style replies flatten quote levels, including earlier replies.
+    // Work on sanitized DOM so tables, links and signatures remain intact.
+    // A template's content is inert: parsed into a plain div, the original's
+    // remote images would load here, past the parking the island does.
+    const container = document.createElement("template");
+    container.innerHTML = html;
+    const content = container.content;
+    content.querySelectorAll("blockquote").forEach((quote) => {
+      const block = content.ownerDocument.createElement("div");
+      block.append(...Array.from(quote.childNodes));
+      quote.replaceWith(block);
+    });
+    content.querySelectorAll<HTMLElement>(`[${QUOTED_HTML_MARKER}]`).forEach((quote) => {
+      quote.setAttribute("data-quote-border", "false");
+      quote.style.borderLeft = "none";
+      quote.style.paddingLeft = "0";
+    });
+    html = container.innerHTML;
+  }
   const remote = opts.remoteAllowed ? ` ${QUOTED_REMOTE_ALLOWED_ATTR}="allowed"` : "";
-  return `<div ${QUOTED_HTML_MARKER}${remote} style="${QUOTE_BAR_STYLE}">${sanitizedInnerHtml}</div>`;
+  const borderAttribute = showQuoteBorder ? "" : ' data-quote-border="false"';
+  const style = showQuoteBorder ? QUOTE_BAR_STYLE : "margin-top:8px;";
+  return `<div ${QUOTED_HTML_MARKER}${remote}${borderAttribute} style="${style}">${html}</div>`;
 }

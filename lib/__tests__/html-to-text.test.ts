@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { htmlToPlainText } from '../html-to-text';
 
@@ -28,6 +28,12 @@ describe('htmlToPlainText', () => {
     expect(
       htmlToPlainText('<p><a href="mailto:alice@example.com">alice@example.com</a></p>')
     ).toBe('alice@example.com');
+  });
+
+  it('renders an @mention as just its text', () => {
+    expect(
+      htmlToPlainText('<p>Hi <a href="mailto:dana@example.com" class="mention">@Dana</a> see <a href="mailto:info@example.com">us</a></p>')
+    ).toBe("Hi @Dana see us <mailto:info@example.com>");
   });
 
   it('renders links as "text <href>" when they differ', () => {
@@ -73,6 +79,20 @@ describe('htmlToPlainText', () => {
 
     it('nests quotes', () => {
       expect(htmlToPlainText('<blockquote><p>a</p><blockquote><p>b</p></blockquote></blockquote>', mail)).toBe('> a\n>\n> > b');
+    });
+
+    // Every quote level used to serialise its innerHTML and parse it again, so
+    // Reply on a long thread of nested quotes did quadratic work.
+    it('parses a deeply nested quote once', () => {
+      const depth = 300;
+      const html = '<blockquote>'.repeat(depth) + '<p>deep</p>' + '</blockquote>'.repeat(depth);
+      const parse = vi.spyOn(DOMParser.prototype, 'parseFromString');
+      try {
+        expect(htmlToPlainText(html, mail)).toBe(`${'> '.repeat(depth)}deep`);
+        expect(parse).toHaveBeenCalledTimes(1);
+      } finally {
+        parse.mockRestore();
+      }
     });
 
     it('marks list items', () => {

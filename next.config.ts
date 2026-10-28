@@ -49,6 +49,8 @@ if (isLite && (process.env.NEXT_PUBLIC_LOCALE_PREFIX ?? "never") !== "always") {
 
 const nextConfig: NextConfig = {
   output: isLite ? "export" : "standalone",
+  // No `X-Powered-By: Next.js` on every response.
+  poweredByHeader: false,
   // Directory-style pages (out/en/mail/index.html) are what static hosts and
   // the shipped SPA-fallback rules expect; next/image has no optimizer here.
   ...(isLite ? { trailingSlash: true, images: { unoptimized: true } } : {}),
@@ -59,14 +61,10 @@ const nextConfig: NextConfig = {
   // it from node_modules at runtime instead of trying to bundle it. Used by
   // PLUGIN_DEV_DIR's on-the-fly bundler.
   serverExternalPackages: ["esbuild"],
-  experimental: {
-    // proxy.ts runs for every request, /api included, and Next buffers the
-    // body for it up to this size and silently cuts off the rest. 10 MB (the
-    // default) truncated WOPI saves and WebDAV uploads of bigger files, and
-    // plugin uploads through /api/plugin-proxy. Keep MAX_PROXY_REQUEST_BYTES
-    // in lib/plugin-secrets/proxy.ts in step with it.
-    proxyClientMaxBodySize: "100mb",
-  },
+  // No proxyClientMaxBodySize: Next copies every body proxy.ts runs for up to
+  // that size before routing, so it stays at the 10 MB default. The routes
+  // that take bigger uploads (WOPI saves, WebDAV, /api/plugin-proxy) are left
+  // out of the proxy's matcher instead.
   // Response headers are the host's job in a static export (see out/_headers).
   ...(isLite
     ? {}
@@ -79,6 +77,25 @@ const nextConfig: NextConfig = {
               source: "/_next/static/:path*",
               headers: [{ key: "Access-Control-Allow-Origin", value: "*" }],
             },
+            {
+              // The plugin sandbox document's script and stylesheet
+              // (scripts/build-plugin-sandbox.mjs): module scripts, so the
+              // opaque-origin frames fetch them in CORS mode. Content-hashed.
+              source: "/plugin-sandbox-assets/:path*",
+              headers: [
+                { key: "Access-Control-Allow-Origin", value: "*" },
+                { key: "Cache-Control", value: "public, max-age=31536000, immutable" },
+              ],
+            },
+            // The upload routes proxy.ts's matcher leaves out, with the
+            // headers it sets on every other API response.
+            ...["/api/webdav", "/api/plugin-proxy", "/api/wopi/files/:fileId/contents"].map((source) => ({
+              source,
+              headers: [
+                { key: "X-Content-Type-Options", value: "nosniff" },
+                { key: "X-Frame-Options", value: "DENY" },
+              ],
+            })),
           ];
         },
       }),
@@ -99,11 +116,12 @@ const nextConfig: NextConfig = {
     "!(next-server)": ["./data/**/*", "./local-data/**/*", "./.env*"],
   },
   turbopack: {
-    root: import.meta.dirname,
+    root: process.env.NEXT_TURBOPACK_ROOT || import.meta.dirname,
   },
   env: {
     NEXT_PUBLIC_GIT_COMMIT: gitCommitHash,
-    NEXT_PUBLIC_APP_VERSION: appVersion,
+    // A dev server may announce another version, e.g. to try a plugin that needs the next release.
+    NEXT_PUBLIC_APP_VERSION: process.env.NEXT_PUBLIC_APP_VERSION || appVersion,
     NEXT_PUBLIC_BASE_PATH: basePath,
     NEXT_PUBLIC_DEV_MOCK_JMAP: process.env.DEV_MOCK_JMAP ?? "",
     NEXT_PUBLIC_BULWARK_LITE: isLite ? "1" : "",

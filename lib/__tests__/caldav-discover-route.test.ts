@@ -68,12 +68,31 @@ describe('POST /api/caldav/discover', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 
+  it('bounds how many PROPFINDs one request can fan out into', async () => {
+    fetchSpy.mockResolvedValue({ status: 404, headers: new Headers() });
+    const candidates = Array.from({ length: 200 }, (_, i) => `c${i}`);
+    const accounts = Array.from({ length: 50 }, (_, i) => ({ key: `A${i}`, candidates }));
+    const res = read(await POST(makeReq({ accounts })));
+    expect(res.status).toBe(200);
+    expect(fetchSpy.mock.calls.length).toBeLessThanOrEqual(100);
+    expect(Object.keys((await res.json()).accounts).length).toBeLessThanOrEqual(10);
+  });
+
   it('catches a probe error and continues to the next candidate', async () => {
     fetchSpy
       .mockRejectedValueOnce(new Error('boom'))
       .mockResolvedValueOnce({ status: 207, headers: new Headers() });
     const res = read(await POST(makeReq({ accounts: [{ key: 'A', candidates: ['c1', 'c2'] }] })));
     expect((await res.json()).accounts.A).toEqual({ url: target('c2'), resolvedAccount: 'c2' });
+  });
+
+  it('keeps the path prefix of a server mounted below the root', async () => {
+    mockCreds.mockResolvedValue({ ...CREDS, serverUrl: 'https://host.example.com/stalwart/' });
+    fetchSpy.mockResolvedValue({ status: 207, headers: new Headers() });
+    const data = await read(await POST(makeReq({ accounts: [{ key: 'A', candidates: ['c1'] }] }))).json();
+    expect(data.wellKnownUrl).toBe('https://host.example.com/stalwart/.well-known/caldav');
+    expect(data.accounts.A.url).toBe('https://host.example.com/stalwart/dav/cal/c1');
+    expect(fetchSpy).toHaveBeenCalledWith('https://host.example.com/stalwart/dav/cal/c1', expect.anything());
   });
 
   it('de-duplicates and trims candidates before probing', async () => {

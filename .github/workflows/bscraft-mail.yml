@@ -23,7 +23,7 @@ jobs:
       - run: npm ci
       - run: npx vitest run lib/__tests__/bscraft-mail-addresses.test.ts lib/__tests__/jmap-*.test.ts lib/__tests__/calendar-invitation.test.ts lib/__tests__/calendar-event-normalization.test.ts --pool=forks --maxWorkers=2 --testTimeout=15000
       - run: npm run typecheck
-      - run: npx eslint lib/bscraft-mail-addresses.ts lib/jmap/client.ts stores/email-store.ts lib/__tests__/bscraft-mail-addresses.test.ts
+      - run: npx eslint lib/bscraft-mail-addresses.ts lib/bscraft-plain-mime.ts lib/jmap/client.ts stores/email-store.ts lib/__tests__/bscraft-mail-addresses.test.ts lib/__tests__/jmap-bscraft-plain-mime.test.ts
   publish:
     needs: verify
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/bscraft-1.15'
@@ -97,8 +97,8 @@ jobs:
           assert primary in found and image['Id'].removeprefix('sha256:') in found
           receipt={'image':os.environ['IMMUTABLE_IMAGE'],'revision':os.environ['GITHUB_SHA'],
             'image_config_digest':image['Id'],'archive_sha256':hashlib.file_digest(archive.open('rb'),'sha256').hexdigest(),
-            'upstream_revision':'fc22f111efaefa837d1796864664935c12cbc7bd','all_oci_blobs_verified':len(found)}
+            'upstream_revision':'b0d1a97bb36374c4d9bbb029d02959dc6b3c1524','all_oci_blobs_verified':len(found)}
           pathlib.Path('recovery/receipt.json').write_text(json.dumps(receipt,indent=2)+'\n')
           pathlib.Path('recovery/webmail.oci.tar.sha256').write_text(receipt['archive_sha256']+'  webmail.oci.tar\n')
           PY
-          gh release create "bscraft-$GITHUB_SHA" --target "$GITHUB_SHA" --title "bscraft mail $GITHUB_SHA" --notes 'Based on Bulwark Webmail 1.15.0. Corporate address presentation; original MIME, IDs and attachments remain stored.' recovery/*
+          gh release create "bscraft-$GITHUB_SHA" --target "$GITHUB_SHA" --title "bscraft mail $GITHUB_SHA" --notes 'Based on Bulwark Webmail 1.18.0. Corporate address presentation; original MIME, IDs and attachments remain stored.' recovery/*

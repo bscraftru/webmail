@@ -85,8 +85,8 @@ export const HOOK_CATALOG = {
   // ─── Mail: organizing ──────────────────────────────────────
   onBeforeEmailDelete: H('mail-organize', 'intercept', 'email:write', '{ emailIds, permanent }', 'before messages are deleted or moved to Trash'),
   onAfterEmailDelete: H('mail-organize', 'observer', 'email:read', '{ emailIds, permanent }', 'after messages were deleted'),
-  onBeforeEmailMove: H('mail-organize', 'intercept', 'email:write', '{ emailIds, fromMailboxId, toMailboxId }', 'before messages are moved'),
-  onAfterEmailMove: H('mail-organize', 'observer', 'email:read', '{ emailIds, fromMailboxId, toMailboxId }', 'after messages were moved'),
+  onBeforeEmailMove: H('mail-organize', 'intercept', 'email:write', '{ emailIds, fromMailboxId, toMailboxId }', 'before messages are moved (toMailboxId null: removed from fromMailboxId only, still in other folders)'),
+  onAfterEmailMove: H('mail-organize', 'observer', 'email:read', '{ emailIds, fromMailboxId, toMailboxId }', 'after messages were moved (toMailboxId null: removed from fromMailboxId only, still in other folders)'),
   onBeforeEmailArchive: H('mail-organize', 'intercept', 'email:write', '{ emailIds }', 'before messages are archived'),
   onEmailArchive: H('mail-organize', 'observer', 'email:read', '{ emailIds }', 'after messages were archived'),
   onEmailUnarchive: H('mail-organize', 'observer', 'email:read', '{ emailIds, toMailboxId }', 'after messages were moved out of the archive'),
@@ -116,7 +116,7 @@ export const HOOK_CATALOG = {
   // ─── Mail: search ──────────────────────────────────────────
   onSearch: H('mail-search', 'transform', 'email:read', '{ query, filters: SearchFilters }', 'before a search runs; may change the query and filters'),
   onSearchResults: H('mail-search', 'transform', 'email:read', 'string[], { query, filters, emailIds }', 'after search results arrived; return ids of further messages to add to them (at most 100)'),
-  onProvideSearchResults: H('mail-search', 'transform', 'email:read', 'ExternalSearchResult[], { query, filters }', 'to add results from elsewhere to a search'),
+  onProvideSearchResults: H('mail-search', 'transform', 'email:read', 'ExternalSearchResult[], { query, filters }', 'to add results from elsewhere to a search; drawn above its message list; an entry naming a message (email) opens it on a click, any other click comes back as onAction with surface "search-results" and the entry\'s key'),
 
   // ─── Mail: attachments ─────────────────────────────────────
   onBeforeAttachmentUpload: H('mail-attachments', 'intercept', 'email:read', 'AttachmentInfo', 'before a file is attached in the composer'),

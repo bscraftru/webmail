@@ -5,16 +5,20 @@ import {
   getEffectiveAlerts,
   buildAlertKey,
   getPendingAlerts,
+  getPendingTaskAlerts,
+  withOwnAlertIds,
   getCalendarDefaultAlerts,
   offsetToAlertUnit,
   describeAlert,
   alertsToRows,
   rowsToAlerts,
   newAlertRow,
+  computeTaskFireTime,
 } from '../calendar-alerts';
 import type {
   CalendarEvent,
   CalendarEventAlert,
+  CalendarTask,
   Calendar,
 } from '@/lib/jmap/types';
 
@@ -519,5 +523,69 @@ describe('getPendingAlerts', () => {
     const result = getPendingAlerts([event], calendars, new Set(), now);
     expect(result).toHaveLength(1);
     expect(result[0].calendarName).toBeNull();
+  });
+});
+
+// Stalwart 1.0 fills a calendar's default alerts into `alerts` while
+// `useDefaultAlerts` is on, under the default alerts' own ids (for tasks as
+// well). 0.16 copied the defaults into `alerts` once, when the event was
+// created. Either way each alert fires once.
+describe('default alerts filled in by the server', () => {
+  const eventStart = new Date('2026-03-01T10:00:00Z').getTime();
+  const defaults = { 'default-5': makeAlert(), 'default-mail': makeAlert({ action: 'email' }) };
+  const calendars = [makeCalendar({ defaultAlertsWithTime: defaults })];
+
+  it('fires each default alert of an event once on Stalwart 1.0', () => {
+    const event = makeEvent({ useDefaultAlerts: true, alerts: { ...defaults } });
+    const pending = getPendingAlerts([event], calendars, new Set(), eventStart - 5 * 60 * 1000 + 1000);
+    expect(pending.map((p) => p.alertId)).toEqual(['default-5']);
+  });
+
+  it('fires each default alert of an event once on 0.16', () => {
+    // Copied in at create time, under ids of 0.16's own. The copy is what the
+    // server and other clients fire, so it is what fires here too.
+    const event = makeEvent({ useDefaultAlerts: true, alerts: { copied: makeAlert() } });
+    const pending = getPendingAlerts([event], calendars, new Set(), eventStart - 5 * 60 * 1000 + 1000);
+    expect(pending.map((p) => p.alertId)).toEqual(['copied']);
+  });
+
+  it('fires the default alerts filled into a task once on Stalwart 1.0', () => {
+    const task = {
+      id: 'task-1', '@type': 'Task', title: 'Pay rent', calendarIds: { 'cal-1': true },
+      due: '2026-03-01T10:00:00Z', progress: 'needs-action', useDefaultAlerts: true, alerts: { ...defaults },
+    } as unknown as CalendarTask;
+    const pending = getPendingTaskAlerts([task], calendars, new Set(), eventStart - 5 * 60 * 1000 + 1000);
+    expect(pending.map((p) => p.alertId)).toEqual(['default-5']);
+  });
+});
+
+describe('withOwnAlertIds', () => {
+  it('numbers the alerts past the ids that are taken', () => {
+    const [a, b] = [makeAlert({ trigger: { '@type': 'OffsetTrigger', offset: '-PT5M', relativeTo: 'start' } }), makeAlert()];
+    expect(withOwnAlertIds([a, b], ['alert1', 'default-5'])).toEqual({ alert2: a, alert3: b });
+    expect(withOwnAlertIds([], ['alert1'])).toEqual({});
+  });
+});
+
+describe('computeTaskFireTime (#1328)', () => {
+  const task = (start: string | null, due: string | null) => ({ start, due } as CalendarTask);
+  const offset = (relativeTo?: 'start' | 'end') => ({ '@type': 'OffsetTrigger' as const, offset: '-PT5M', ...(relativeTo ? { relativeTo } : {}) }) as Parameters<typeof computeTaskFireTime>[1];
+  const at = (s: string) => new Date(s).getTime();
+
+  it('counts a start-relative alert from the start', () => {
+    expect(computeTaskFireTime(task('2026-10-23T20:00:00Z', '2026-10-23T20:15:00Z'), offset('start'))).toBe(at('2026-10-23T19:55:00Z'));
+  });
+
+  it('treats a missing relativeTo as start, as Stalwart sends it', () => {
+    expect(computeTaskFireTime(task('2026-10-23T20:00:00Z', '2026-10-23T20:15:00Z'), offset())).toBe(at('2026-10-23T19:55:00Z'));
+  });
+
+  it('counts an end-relative alert from the due time', () => {
+    expect(computeTaskFireTime(task('2026-10-23T20:00:00Z', '2026-10-23T20:15:00Z'), offset('end'))).toBe(at('2026-10-23T20:10:00Z'));
+  });
+
+  it('falls back to the due time when the task has no start', () => {
+    expect(computeTaskFireTime(task(null, '2026-10-23T20:15:00Z'), offset('start'))).toBe(at('2026-10-23T20:10:00Z'));
+    expect(computeTaskFireTime(task(null, null), offset('start'))).toBeNull();
   });
 });

@@ -5,6 +5,7 @@ import { CONFIG_ENV_MAP, DEFAULT_FEATURE_GATES, DEFAULT_POLICY, DEFAULT_THEME_PO
 import { ensureConfigDir, getConfigPath, assertWritable } from './paths';
 import { isValidRelayUrl, normalizeRelayUrl } from '@/lib/push-relays';
 import { sanitizeDefaultSidebarApps } from '@/lib/sidebar-apps';
+import { sanitizePolicyDefaults } from './policy-defaults';
 
 function parseEnvValue(value: string, type: string): unknown {
   switch (type) {
@@ -213,6 +214,8 @@ class ConfigManager {
     // Operator-pinned sidebar apps reach every user's rail, and policy.json can
     // be hand-edited, so the list is validated here rather than at render time.
     policy.defaultSidebarApps = sanitizeDefaultSidebarApps(policy.defaultSidebarApps);
+    // Same for the values users start with (#1248).
+    policy.defaults = sanitizePolicyDefaults(policy.defaults);
     return policy;
   }
 
@@ -239,7 +242,8 @@ class ConfigManager {
     await ensureConfigDir();
     const targetPath = getConfigPath(filename);
     const tmpPath = targetPath + '.tmp';
-    await writeFile(tmpPath, JSON.stringify(data, null, 2), 'utf-8');
+    // Owner-only: config.json carries the session secret and OAuth client secrets.
+    await writeFile(tmpPath, JSON.stringify(data, null, 2), { encoding: 'utf-8', mode: 0o600 });
     await rename(tmpPath, targetPath);
   }
 }
