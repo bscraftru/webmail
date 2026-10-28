@@ -49,6 +49,12 @@ if (isLite && (process.env.NEXT_PUBLIC_LOCALE_PREFIX ?? "never") !== "always") {
 
 const nextConfig: NextConfig = {
   output: isLite ? "export" : "standalone",
+  // next-intl adds a webpack callback, which otherwise disables Next's build
+  // worker. Release the compiler before type checking on bounded builders.
+  experimental: {
+    webpackBuildWorker: true,
+    webpackMemoryOptimizations: true,
+  },
   // No `X-Powered-By: Next.js` on every response.
   poweredByHeader: false,
   // Directory-style pages (out/en/mail/index.html) are what static hosts and
