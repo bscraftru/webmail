@@ -40,6 +40,7 @@ import { toInertBlob } from "@/lib/file-preview";
 import { toStorageQuota, type JMAPQuota, type StorageQuota } from "@/lib/quota";
 import { messagePriorityHeaders, type MessagePriority } from "@/lib/message-priority";
 import { isRequestDeadline, withRequestDeadline } from '@/lib/request-deadline';
+import { bscraftJmapCredentials } from '@/lib/bscraft-jmap-credentials';
 
 // Cap for the follow-up Email/get issued when a displayed body part comes
 // back truncated at the normal 256000-byte limit (see refetchTruncatedBodyValues
@@ -1682,7 +1683,15 @@ export class JMAPClient implements IJMAPClient {
     }, timeoutMs);
 
     try {
-      return await fetch(url, { ...init, headers, signal: controller.signal });
+      return await fetch(url, {
+        ...init,
+        headers,
+        signal: controller.signal,
+        // Same-origin fetch otherwise attaches the application's large encrypted
+        // session/context cookies to every JMAP call and SSE reconnect. Stalwart
+        // uses the Authorization header; those cookies only inflate the upload.
+        credentials: bscraftJmapCredentials(url, init?.credentials),
+      });
     } catch (error) {
       if (timedOut) throw new RequestTimeoutError(timeoutMs);
       throw error;
