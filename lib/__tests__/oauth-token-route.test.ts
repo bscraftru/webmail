@@ -105,6 +105,30 @@ describe('oauth token route - access token cache (#552)', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it.each(['headers', 'body'] as const)('bounds a stalled provider %s without deleting the refresh cookie', async (stage) => {
+    await import('@/app/api/auth/token/route');
+    vi.useFakeTimers();
+    cookieStore.set('jmap_rt', 'refresh-token');
+    let providerSignal: AbortSignal | undefined;
+    fetchMock.mockImplementation((_url, init) => {
+      providerSignal = init.signal;
+      if (stage === 'headers') return new Promise<Response>(() => {});
+      return Promise.resolve(new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"access_token":'));
+          providerSignal?.addEventListener('abort', () => controller.error(providerSignal?.reason), { once: true });
+        },
+      })));
+    });
+    const pending = callPut();
+    await vi.advanceTimersByTimeAsync(15_100);
+    expect(await pending).toMatchObject({ status: 503 });
+    expect(providerSignal?.aborted).toBe(true);
+    expect(cookieStore.get('jmap_rt')?.value).toBe('refresh-token');
+    expect(cookieStore.deleted).toEqual([]);
   });
 
   it('serves the cached access token without contacting the IdP', async () => {

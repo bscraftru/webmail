@@ -224,7 +224,8 @@ describe('JMAPClient resilience', () => {
 
       const pending = client.ping();
       const assertion = expect(pending).rejects.toBeInstanceOf(RequestTimeoutError);
-      await vi.advanceTimersByTimeAsync(30_000);
+      // A read gets one new attempt after its first deadline.
+      await vi.advanceTimersByTimeAsync(61_100);
       await assertion;
     });
 
@@ -282,6 +283,81 @@ describe('JMAPClient resilience', () => {
       await vi.advanceTimersByTimeAsync(300_000);
       await pending;
       expect(outcome).toBeInstanceOf(RequestTimeoutError);
+    });
+
+    it('recovers five consecutive mail reloads whose response bodies stall after the headers', async () => {
+      const client = await createConnectedClient();
+      const stalledSignals: AbortSignal[] = [];
+      let readAttempts = 0;
+      fetchSpy.mockImplementation((_url: RequestInfo | URL, init?: RequestInit) => {
+        if (String(init?.body).includes('Core/echo')) return Promise.resolve(mockFetchResponse(200, {
+          methodResponses: [['Core/echo', { ping: 'pong' }, '0']],
+        }));
+        if (++readAttempts % 2 === 0) return Promise.resolve(mockFetchResponse(200, {
+          methodResponses: [['Mailbox/get', { list: [{ id: 'inbox', name: 'Inbox', role: 'inbox' }] }, '0']],
+        }));
+        const signal = init?.signal;
+        if (signal) stalledSignals.push(signal);
+        return Promise.resolve(new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"methodResponses":'));
+            signal?.addEventListener('abort', () => controller.error(signal.reason), { once: true });
+          },
+        }), { headers: { 'Content-Type': 'application/json' } }));
+      });
+
+      for (let reload = 0; reload < 5; reload++) {
+        let outcome: unknown;
+        const pending = client.getMailboxes().then(result => { outcome = result; }, error => { outcome = error; });
+        await vi.advanceTimersByTimeAsync(31_100);
+        expect(outcome).toEqual([expect.objectContaining({ id: 'inbox' })]);
+        await pending;
+      }
+      expect(stalledSignals).toHaveLength(5);
+      expect(stalledSignals.every(signal => signal.aborted)).toBe(true);
+      expect(readAttempts).toBe(10);
+    });
+
+    it('bounds a session body that stops after the response headers', async () => {
+      let sessionSignal: AbortSignal | undefined;
+      fetchSpy.mockImplementation((_url: RequestInfo | URL, init?: RequestInit) => {
+        sessionSignal = init?.signal ?? undefined;
+        return Promise.resolve(new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"accounts":'));
+            sessionSignal?.addEventListener('abort', () => controller.error(sessionSignal?.reason), { once: true });
+          },
+        })));
+      });
+      const client = new JMAPClient('https://mail.example.com', 'user@test.com', 'pass123');
+      liveClients.push(client);
+      const pending = client.connect();
+      const assertion = expect(pending).rejects.toBeInstanceOf(RequestTimeoutError);
+      await vi.advanceTimersByTimeAsync(30_100);
+      await assertion;
+      expect(sessionSignal?.aborted).toBe(true);
+    });
+
+    it('does not replay a write whose response body stalls', async () => {
+      const client = await createConnectedClient();
+      let writeSignal: AbortSignal | undefined;
+      fetchSpy.mockImplementation((_url: RequestInfo | URL, init?: RequestInit) => {
+        if (!String(init?.body).includes('Email/set')) return Promise.resolve(mockFetchResponse(200, {
+          methodResponses: [['Core/echo', { ping: 'pong' }, '0']],
+        }));
+        writeSignal = init?.signal ?? undefined;
+        return Promise.resolve(new Response(new ReadableStream({
+          start(controller) {
+            writeSignal?.addEventListener('abort', () => controller.error(writeSignal?.reason), { once: true });
+          },
+        })));
+      });
+      const pending = client.toggleStar('e1', true);
+      const assertion = expect(pending).rejects.toBeInstanceOf(RequestTimeoutError);
+      await vi.advanceTimersByTimeAsync(31_100);
+      await assertion;
+      expect(writeSignal?.aborted).toBe(true);
+      expect(fetchSpy.mock.calls.filter(([, init]: [unknown, RequestInit?]) => String(init?.body).includes('Email/set'))).toHaveLength(1);
     });
   });
 

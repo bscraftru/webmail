@@ -45,6 +45,7 @@ import {
   saveLiteRefreshToken,
 } from '@/lib/auth/lite-tokens';
 import { clearLiteOAuthFlow, readLiteOAuthFlow } from '@/lib/auth/lite-oauth';
+import { isRequestDeadline, withRequestDeadline } from '@/lib/request-deadline';
 
 /** Logins restored at once after the one on screen: enough to overlap round trips, few enough not to crowd the server. */
 const RESTORE_CONCURRENCY = 4;
@@ -218,6 +219,7 @@ function isTransientAuthError(error: unknown): boolean {
   // got through (connect() reports that as CORS_ERROR, which is also what a
   // load balancer switching origins produces), is an outage too. (#1167)
   if (error instanceof RequestTimeoutError) return true;
+  if (isRequestDeadline(error)) return true;
   if (error instanceof Error && error.message === 'CORS_ERROR') return true;
   // JMAPClient.connect()/refreshSession() embed the HTTP status in the
   // message - a 5xx there is the server being down, not an auth failure.
@@ -319,6 +321,26 @@ function trackSessionWrite<T>(slot: number, run: (signal: AbortSignal) => Promis
   return request;
 }
 
+type AuthJsonResponse = Pick<Response, 'ok' | 'status' | 'json'>;
+const AUTH_REQUEST_TIMEOUT_MS = 30_000;
+
+/** Read the finite JSON body before clearing the deadline, preserving parse errors. */
+function fetchAuthResponse(path: string, init: RequestInit): Promise<AuthJsonResponse> {
+  return withRequestDeadline(AUTH_REQUEST_TIMEOUT_MS, async (signal) => {
+    const response = await apiFetch(path, { ...init, signal });
+    const parsed = await response.json().then(value => ({ value }), error => ({ error }));
+    signal.throwIfAborted();
+    return {
+      ok: response.ok,
+      status: response.status,
+      json: async () => {
+        if ('error' in parsed) throw parsed.error;
+        return parsed.value;
+      },
+    };
+  }, init.signal);
+}
+
 const TIMED_OUT = Symbol('timed out');
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
@@ -350,7 +372,7 @@ async function syncStalwartAuthContext(
   // signed out must not get its context back.
   if (IS_LITE || closingSlots.has(slot)) return;
   try {
-    const response = await trackSessionWrite(slot, (signal) => apiFetch('/api/auth/stalwart-context', {
+    const response = await trackSessionWrite(slot, (signal) => fetchAuthResponse('/api/auth/stalwart-context', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ serverUrl, username, authHeader, slot }),
@@ -535,11 +557,11 @@ async function persistSession(slot: number, session: RememberedSession): Promise
 }
 
 /** PUT /api/auth/token?slot=N - renew (or, unless `force`, reuse) the slot's access token. */
-async function fetchSlotAccessToken(slot: number, opts: { force?: boolean } = {}): Promise<Response> {
+async function fetchSlotAccessToken(slot: number, opts: { force?: boolean } = {}): Promise<AuthJsonResponse> {
   // Renewing would write the tokens of a slot being signed out back.
   if (closingSlots.has(slot)) return jsonResponse({ error: 'signed_out' }, 401);
   if (!IS_LITE) {
-    return trackSessionWrite(slot, (signal) => apiFetch(`/api/auth/token?slot=${slot}${opts.force ? '&force=true' : ''}`, { method: 'PUT', signal }));
+    return trackSessionWrite(slot, (signal) => fetchAuthResponse(`/api/auth/token?slot=${slot}${opts.force ? '&force=true' : ''}`, { method: 'PUT', signal }));
   }
   // Like the route's cookie cache: a restore resumes with the token it had,
   // since a renewal before the refresh token's `nbf` is refused (#552).
@@ -559,9 +581,9 @@ async function fetchSlotAccessToken(slot: number, opts: { force?: boolean } = {}
 }
 
 /** PUT /api/auth/session[?slot=N] - the slot's remembered password or access token. */
-async function fetchSlotSession(slot?: number): Promise<Response> {
+async function fetchSlotSession(slot?: number): Promise<AuthJsonResponse> {
   if (!IS_LITE) {
-    return apiFetch(slot === undefined ? '/api/auth/session' : `/api/auth/session?slot=${slot}`, { method: 'PUT' });
+    return fetchAuthResponse(slot === undefined ? '/api/auth/session' : `/api/auth/session?slot=${slot}`, { method: 'PUT' });
   }
   const stored = readLiteBasicSession(slot ?? 0);
   return stored ? jsonResponse(stored) : jsonResponse({ error: 'no_session' }, 401);
@@ -2605,7 +2627,7 @@ export const useAuthStore = create<AuthState>()(
         // (Not in Lite: nothing hands sessions over server-side.)
         if (accounts.length === 0 && !IS_LITE) {
           try {
-            const restore = await apiFetch('/api/auth/session', { method: 'PUT' });
+            const restore = await fetchSlotSession();
             if (restore.ok) {
               const data = await restore.json();
               if (data?.serverUrl && data?.username && (data?.password || data?.token)) {

@@ -30,6 +30,7 @@ import {
 } from '@/lib/oauth/end-session';
 import { MAX_ACCOUNT_SLOTS } from '@/lib/account-utils';
 import { rejectCrossOriginRequest } from '@/lib/security/same-origin';
+import { isRequestDeadline, withRequestDeadline } from '@/lib/request-deadline';
 
 function parseSlot(raw: string | null): number | null {
   if (raw === null) return null;
@@ -45,6 +46,7 @@ function getSlot(request: NextRequest): number {
 // Sign-out waits for this route, so an unresponsive revocation endpoint must
 // not hold it up for long.
 const REVOCATION_TIMEOUT_MS = 3000;
+const TOKEN_REFRESH_TIMEOUT_MS = 15_000;
 
 async function revokeRefreshToken(token: string, serverId: string | null, metadata: OAuthMetadata | null): Promise<void> {
   if (!metadata?.revocation_endpoint) return;
@@ -218,16 +220,23 @@ export async function PUT(request: NextRequest) {
       refresh_token: refreshToken,
     }, serverId, await defaultClientOptions(serverId));
 
-    const tokenResponse = await fetch(tokenEndpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: params.toString(),
-      // See revokeRefreshToken: the body holds the refresh token.
-      redirect: 'error',
+    const { tokenResponse, errorText, tokens } = await withRequestDeadline(TOKEN_REFRESH_TIMEOUT_MS, async (signal) => {
+      const tokenResponse = await fetch(tokenEndpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: params.toString(),
+        // See revokeRefreshToken: the body holds the refresh token.
+        redirect: 'error',
+        signal,
+      });
+      return {
+        tokenResponse,
+        errorText: tokenResponse.ok ? undefined : await tokenResponse.text(),
+        tokens: tokenResponse.ok ? await tokenResponse.json() : undefined,
+      };
     });
 
     if (!tokenResponse.ok) {
-      const errorText = await tokenResponse.text();
       logger.error('Token refresh failed', { status: tokenResponse.status, error: errorText });
       // Drop the refresh token only when the server definitively rejected it
       // (invalid/expired/revoked grant). A 5xx or 429 is an outage - keeping
@@ -242,8 +251,6 @@ export async function PUT(request: NextRequest) {
       }
       return NextResponse.json({ error: 'Token endpoint unavailable' }, { status: 503 });
     }
-
-    const tokens = await tokenResponse.json();
 
     if (!tokens.access_token) {
       logger.error('Refresh response missing access_token', { response: JSON.stringify(tokens).substring(0, 500) });
@@ -268,6 +275,9 @@ export async function PUT(request: NextRequest) {
     });
   } catch (error) {
     logger.error('Token refresh error', { error: error instanceof Error ? error.message : 'Unknown error' });
+    if (isRequestDeadline(error)) {
+      return NextResponse.json({ error: 'Token endpoint unavailable' }, { status: 503 });
+    }
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

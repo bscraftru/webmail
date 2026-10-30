@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import { createConfig } from '@/lib/__tests__/fixtures/config';
 
 // A reload during a server outage must keep a remembered account. Only a real
@@ -45,14 +45,15 @@ const account = {
   rememberMe: true, cookieSlot: 0, displayName: 'Bob', email: 'bob@x.test', isConnected: false, hasError: false,
   lastLoginAt: 1, avatarColor: '#000000', isDefault: true,
 };
-const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+const normalFetch = async (input: unknown, init?: RequestInit) => {
   const url = String(input);
-  if (url.includes('/api/auth/session') && (!init?.method || init.method === 'GET')) {
+  if (url.includes('/api/auth/session') && init?.method !== 'DELETE') {
     return new Response(JSON.stringify({ serverUrl: account.serverUrl, username: account.username, password: 'x' }), { status: 200 });
   }
   if (url.includes('/api/config')) return new Response(JSON.stringify(createConfig()), { status: 200 });
   return new Response('{}', { status: 200 });
-});
+};
+const fetchMock = vi.fn(normalFetch);
 
 function credentialsCleared() {
   return fetchMock.mock.calls.some(([input, init]) => String(input).includes('/api/auth/session') && init?.method === 'DELETE');
@@ -63,9 +64,39 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  fetchMock.mockClear();
-  useAuthStore.setState({ isAuthenticated: false, client: null, activeAccountId: null, error: null });
+  fetchMock.mockReset().mockImplementation(normalFetch);
+  connectError.current = null;
+  useAuthStore.setState({ isAuthenticated: false, isLoading: false, client: null, activeAccountId: null, error: null });
   useAccountStore.setState({ accounts: [account] as never, activeAccountId: account.id, defaultAccountId: account.id });
+});
+
+afterEach(() => vi.useRealTimers());
+
+it.each([
+  ['basic', 'headers'], ['basic', 'body'], ['oauth', 'headers'], ['oauth', 'body'],
+] as const)('ends a stalled %s restore at the %s without evicting the account', async (authMode, stage) => {
+  vi.useFakeTimers();
+  useAccountStore.setState({ accounts: [{ ...account, authMode }] as never });
+  let requestSignal: AbortSignal | undefined;
+  fetchMock.mockImplementation(async (input, init) => {
+    const endpoint = authMode === 'oauth' ? '/api/auth/token' : '/api/auth/session';
+    if (!String(input).includes(endpoint) || init?.method !== 'PUT') return normalFetch(input, init);
+    requestSignal = init.signal ?? undefined;
+    if (stage === 'headers') return new Promise<Response>(() => {});
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"serverUrl":'));
+        requestSignal?.addEventListener('abort', () => controller.error(requestSignal?.reason), { once: true });
+      },
+    }));
+  });
+  const pending = useAuthStore.getState().checkAuth();
+  await vi.advanceTimersByTimeAsync(30_100);
+  await pending;
+  expect(useAuthStore.getState()).toMatchObject({ isLoading: false, error: 'connection_failed' });
+  expect(requestSignal?.aborted).toBe(true);
+  expect(useAccountStore.getState().getAccountById(account.id)).toMatchObject({ hasError: true, errorMessage: 'Server unreachable' });
+  expect(credentialsCleared()).toBe(false);
 });
 
 it.each([
