@@ -21,9 +21,9 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npx vitest run lib/__tests__/bscraft-mail-addresses.test.ts lib/__tests__/jmap-*.test.ts lib/__tests__/calendar-invitation.test.ts lib/__tests__/calendar-event-normalization.test.ts --pool=forks --maxWorkers=2 --testTimeout=15000
+      - run: npx vitest run lib/__tests__/bscraft-mail-addresses.test.ts lib/__tests__/jmap-*.test.ts lib/__tests__/request-deadline.test.ts lib/__tests__/oauth-token-route.test.ts stores/__tests__/auth-store-*.test.ts lib/__tests__/calendar-invitation.test.ts lib/__tests__/calendar-event-normalization.test.ts --pool=forks --maxWorkers=2 --testTimeout=15000
       - run: npm run typecheck
-      - run: npx eslint lib/bscraft-mail-addresses.ts lib/bscraft-plain-mime.ts lib/jmap/client.ts stores/email-store.ts lib/__tests__/bscraft-mail-addresses.test.ts lib/__tests__/jmap-bscraft-plain-mime.test.ts
+      - run: npx eslint lib/bscraft-mail-addresses.ts lib/bscraft-plain-mime.ts lib/jmap/client.ts lib/request-deadline.ts stores/auth-store.ts app/api/auth/token/route.ts stores/email-store.ts lib/__tests__/bscraft-mail-addresses.test.ts lib/__tests__/jmap-bscraft-plain-mime.test.ts
   publish:
     needs: verify
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/bscraft-1.15'

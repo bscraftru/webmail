@@ -39,6 +39,7 @@ import { downloadNameSegment } from "./download-name";
 import { toInertBlob } from "@/lib/file-preview";
 import { toStorageQuota, type JMAPQuota, type StorageQuota } from "@/lib/quota";
 import { messagePriorityHeaders, type MessagePriority } from "@/lib/message-priority";
+import { isRequestDeadline, withRequestDeadline } from '@/lib/request-deadline';
 
 // Cap for the follow-up Email/get issued when a displayed body part comes
 // back truncated at the normal 256000-byte limit (see refetchTruncatedBodyValues
@@ -191,7 +192,7 @@ export class RateLimitError extends Error {
 }
 
 /**
- * A request produced no response headers within its deadline.
+ * A request did not complete within its deadline.
  *
  * `fetch()` has no timeout of its own, and a half-dead connection - the OS or a
  * NAT dropped the socket while the browser still believes it is usable - never
@@ -1772,6 +1773,16 @@ export class JMAPClient implements IJMAPClient {
     return response;
   }
 
+  /** Finite JSON requests need a deadline through the last body byte, unlike SSE. */
+  private async completeRequest<T>(run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    try {
+      return await withRequestDeadline(JMAPClient.REQUEST_TIMEOUT_MS, run);
+    } catch (error) {
+      if (isRequestDeadline(error)) throw new RequestTimeoutError(JMAPClient.REQUEST_TIMEOUT_MS);
+      throw error;
+    }
+  }
+
   /**
    * Fetch the JMAP session, transparently handling servers that redirect
    * /.well-known/jmap to a canonical session URL (e.g. Stalwart → /jmap/session).
@@ -1787,17 +1798,17 @@ export class JMAPClient implements IJMAPClient {
    * Detect that case (response.redirected, empty accounts, empty username)
    * and retry directly against the final URL so we can re-send Authorization.
    */
-  private async fetchSessionResponse(): Promise<Response> {
+  private async fetchSessionResponse(signal: AbortSignal): Promise<Response> {
     const discoveryUrl = `${this.serverUrl}/.well-known/jmap`;
-    const response = await this.authenticatedFetch(discoveryUrl, { method: 'GET' });
+    const response = await this.authenticatedFetch(discoveryUrl, { method: 'GET', signal });
     // A proxy in front of the session URL answers the header-less redirected
     // request with 401 instead of Stalwart's silent 200 - the credentials are
     // fine, Safari just dropped them. Retry the final URL directly. (#892)
     if (response.redirected && response.status === 401) {
-      return fetch(response.url, {
+      return this.timedFetch(response.url, {
         method: 'GET',
-        headers: { 'Authorization': this.authHeader },
-      });
+        signal,
+      }, { 'Authorization': this.authHeader }, JMAPClient.REQUEST_TIMEOUT_MS);
     }
     if (!response.ok || !response.redirected) return response;
 
@@ -1806,20 +1817,22 @@ export class JMAPClient implements IJMAPClient {
     const hasUsername = typeof peek?.username === 'string' && peek.username.length > 0;
     if (hasAccounts || hasUsername) return response;
 
-    return fetch(response.url, {
+    return this.timedFetch(response.url, {
       method: 'GET',
-      headers: { 'Authorization': this.authHeader },
-    });
+      signal,
+    }, { 'Authorization': this.authHeader }, JMAPClient.REQUEST_TIMEOUT_MS);
   }
 
   private async refreshSession(): Promise<void> {
-    const response = await this.fetchSessionResponse();
+    const session = await this.completeRequest(async (signal) => {
+      const response = await this.fetchSessionResponse(signal);
 
-    if (!response.ok) {
-      throw new Error(`Session refresh failed: ${response.status}`);
-    }
+      if (!response.ok) {
+        throw new Error(`Session refresh failed: ${response.status}`);
+      }
 
-    const session = await response.json();
+      return await response.json();
+    });
     this.rewriteSessionUrls(session);
     this.session = session;
     this.capabilities = session.capabilities || {};
@@ -1833,31 +1846,33 @@ export class JMAPClient implements IJMAPClient {
     const sessionUrl = `${this.serverUrl}/.well-known/jmap`;
 
     try {
-      const sessionResponse = await this.fetchSessionResponse();
+      const session = await this.completeRequest(async (signal) => {
+        const sessionResponse = await this.fetchSessionResponse(signal);
 
-      if (!sessionResponse.ok) {
-        if (sessionResponse.status === 401) {
-          throw new Error(this.authMode === 'bearer'
-            ? 'Authentication failed - token may be expired'
-            : 'Invalid username or password');
-        }
-        if (sessionResponse.status === 402) {
-          try {
-            const body = await sessionResponse.json();
-            // Older Stalwart titled this "TOTP code required"; 0.16+ uses the
-            // generic "MFA code required" - accept either to trigger the prompt.
-            const title = body?.title?.toLowerCase() ?? '';
-            if (title.includes('totp') || title.includes('mfa')) {
-              throw new Error('TOTP_REQUIRED');
-            }
-          } catch (e) {
-            if (e instanceof Error && e.message === 'TOTP_REQUIRED') throw e;
+        if (!sessionResponse.ok) {
+          if (sessionResponse.status === 401) {
+            throw new Error(this.authMode === 'bearer'
+              ? 'Authentication failed - token may be expired'
+              : 'Invalid username or password');
           }
+          if (sessionResponse.status === 402) {
+            try {
+              const body = await sessionResponse.json();
+              // Older Stalwart titled this "TOTP code required"; 0.16+ uses the
+              // generic "MFA code required" - accept either to trigger the prompt.
+              const title = body?.title?.toLowerCase() ?? '';
+              if (title.includes('totp') || title.includes('mfa')) {
+                throw new Error('TOTP_REQUIRED');
+              }
+            } catch (e) {
+              if (e instanceof Error && e.message === 'TOTP_REQUIRED') throw e;
+            }
+          }
+          throw new Error(`Failed to get session: ${sessionResponse.status}`);
         }
-        throw new Error(`Failed to get session: ${sessionResponse.status}`);
-      }
 
-      const session = await sessionResponse.json();
+        return await sessionResponse.json();
+      });
       this.rewriteSessionUrls(session);
 
       this.session = session;
@@ -1884,7 +1899,7 @@ export class JMAPClient implements IJMAPClient {
       )) {
         let serverReachable = false;
         try {
-          await fetch(sessionUrl, { mode: 'no-cors' });
+          await this.timedFetch(sessionUrl, { mode: 'no-cors' }, {}, JMAPClient.REQUEST_TIMEOUT_MS);
           serverReachable = true;
         } catch { /* genuinely unreachable */ }
         if (serverReachable) {
@@ -2026,18 +2041,35 @@ export class JMAPClient implements IJMAPClient {
     const body = JSON.stringify(requestBody);
 
     const apiUrl = this.apiUrl;
+    let recoveredConnection = false;
     for (let attempt = 0; ; attempt++) {
-      const response = await this.firstTouchGate.run(methodCalls, () =>
-        this.authenticatedFetch(apiUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body,
-        }),
-      );
-
-      const responseText = await response.text();
+      let result: { response: Response; responseText: string };
+      let readingBody = false;
+      try {
+        result = await this.completeRequest(async (signal) => {
+          const response = await this.firstTouchGate.run(methodCalls, () =>
+            this.authenticatedFetch(apiUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body,
+              signal,
+            }),
+          );
+          readingBody = true;
+          return { response, responseText: await response.text() };
+        });
+      } catch (error) {
+        // A dead pooled connection can fail before headers or halfway through
+        // JSON. Only reads may be replayed: a lost submission response must
+        // never send the same message again.
+        if (!recoveredConnection && (error instanceof RequestTimeoutError || (readingBody && error instanceof TypeError)) && isReplaySafeRequest({ method: 'POST', body })) {
+          recoveredConnection = true;
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          continue;
+        }
+        throw error;
+      }
+      const { response, responseText } = result;
 
       if (!response.ok) {
         // Stalwart caps parallel API requests per user (maxConcurrentRequests,
@@ -9144,18 +9176,21 @@ export class JMAPClient implements IJMAPClient {
     if (!this.apiUrl) return false;
     try {
       const accountId = this.getFilesAccountId();
-      const response = await this.authenticatedFetch(this.apiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          using: ["urn:ietf:params:jmap:core"],
-          methodCalls: [["FileNode/query", { accountId, filter: {}, limit: 1 }, "probe0"]],
-        }),
+      return await this.completeRequest(async (signal) => {
+        const response = await this.authenticatedFetch(this.apiUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            using: ["urn:ietf:params:jmap:core"],
+            methodCalls: [["FileNode/query", { accountId, filter: {}, limit: 1 }, "probe0"]],
+          }),
+          signal,
+        });
+        if (!response.ok) return false;
+        const data = await response.json();
+        const result = data.methodResponses?.[0];
+        return result && result[0] === "FileNode/query";
       });
-      if (!response.ok) return false;
-      const data = await response.json();
-      const result = data.methodResponses?.[0];
-      return result && result[0] === "FileNode/query";
     } catch {
       return false;
     }
@@ -10262,15 +10297,18 @@ export class JMAPClient implements IJMAPClient {
     const { using, methodCalls } = this.buildStatePollingRequest();
     const responses: JMAPMethodResponse[] = [];
     for (const group of batched(methodCalls, this.getMaxCallsInRequest())) {
-      const response = await this.firstTouchGate.run(group, () =>
-        this.authenticatedFetch(this.apiUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ using, methodCalls: group }),
-        }),
-      );
-      if (!response.ok) continue;
-      const data = await response.json();
+      const data = await this.completeRequest(async (signal) => {
+        const response = await this.firstTouchGate.run(group, () =>
+          this.authenticatedFetch(this.apiUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ using, methodCalls: group }),
+            signal,
+          }),
+        );
+        if (!response.ok) return null;
+        return await response.json();
+      });
       if (Array.isArray(data?.methodResponses)) responses.push(...data.methodResponses);
     }
     return responses;
